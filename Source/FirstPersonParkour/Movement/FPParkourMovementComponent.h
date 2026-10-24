@@ -49,9 +49,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm/s"))
 	float GrappleMaxPullSpeed = 1800.0f;
 
-	/** Capsule-center distance to the surface anchor at which the grapple releases. */
+	/** Minimum attachment distance and pull easing band; never detaches an active swing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm"))
 	float GrappleArrivalDistance = 150.0f;
+
+	/** Desired maximum radius, sampled on attachment. Longer shots reel down only as the player moves inward. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "100", Units = "cm"))
+	float GrappleRopeLength = 1200.0f;
+
+	/** Tangential input acceleration before SteeringInfluence; applied as a force, never an impulse. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float SwingAcceleration = 800.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "0", ClampMax = "1"))
+	float SwingSteeringInfluence = 0.35f;
+
+	/** Exponential tangential drag per second. Zero permits an undamped pendulum. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "0"))
+	float SwingDamping = 0.02f;
+
+	/** Ceiling for generated speed; faster inherited momentum decays smoothly rather than snapping. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "1", Units = "cm/s"))
+	float MaxSwingSpeed = 2400.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple")
 	bool bShowGrappleDebug = true;
@@ -217,9 +236,15 @@ protected:
 	virtual FVector NewFallVelocity(const FVector& InitialVelocity, const FVector& Gravity, float DeltaTime) const override;
 
 private:
-	bool IsGrapplePathClear() const;
+	bool IsGrapplePathClear(bool bCheckCapsulePath = false) const;
 	bool IsGrappleAnchorValid() const;
+	void PhysGrapple(float DeltaTime, int32 Iterations);
+	/** Drift freely while slack, then follow a great-circle arc at the rope limit. */
+	FVector ComputeGrappleDrift(const FVector& Location, FVector& DriftVelocity, float DeltaTime) const;
+	FVector LimitGrappleDelta(const FVector& Location, const FVector& Delta) const;
 	bool bGrappling = false;
+	float ActiveRopeLength = 0.0f;
+	float DesiredRopeLength = 0.0f;
 	FVector GrappleAnchor = FVector::ZeroVector;
 	FVector GrappleNormal = FVector::ZeroVector;
 	TWeakObjectPtr<UPrimitiveComponent> GrappleSurface;
