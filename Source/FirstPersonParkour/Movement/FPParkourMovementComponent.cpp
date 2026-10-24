@@ -3,7 +3,9 @@
 #include "Movement/FPParkourMovementComponent.h"
 #include "Character/FPPlayerCharacter.h"
 #include "Camera/CameraComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "GameFramework/Character.h"
 #include "HAL/IConsoleManager.h"
 
@@ -204,15 +206,26 @@ float UFPParkourMovementComponent::GetMaxSpeed() const
 
 void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode)
 {
+	const bool bWasWallRunning = PreviousMovementMode == MOVE_Custom && PreviousCustomMode == WallRunMode;
+	if (IsWallRunning())
+	{
+		bWallRunUsed = true;
+		WallRunElapsed = 0.0f;
+	}
+	if (IsMovingOnGround())
+	{
+		bWallRunUsed = false;
+		WallRunElapsed = 0.0f;
+	}
 	if (IsFalling() && PreviousMovementMode != MOVE_Falling)
 	{
 		FallingSpeedLimit = FMath::Max(Velocity.Size2D(), CurrentGroundSpeed);
 	}
-	else if (!IsFalling())
+	else if (!IsFalling() && !IsWallRunning())
 	{
 		FallingSpeedLimit = 0.0f;
 	}
-	if (IsMovingOnGround() && PreviousMovementMode == MOVE_Falling)
+	if (IsMovingOnGround() && (PreviousMovementMode == MOVE_Falling || bWasWallRunning))
 	{
 		// Ease down from landing momentum instead of immediately reinstating the walking cap.
 		CurrentGroundSpeed = FMath::Max(WalkSpeed, Velocity.Size2D());
@@ -230,7 +243,7 @@ void UFPParkourMovementComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	if ((bShowMovementDebug || CVarParkourMovementDebug.GetValueOnGameThread() != 0)
 		&& GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
 	{
-		const FString State = IsFalling() ? TEXT("Falling") : IsMovingOnGround()
+		const FString State = IsWallRunning() ? TEXT("Wall Running") : IsFalling() ? TEXT("Falling") : IsMovingOnGround()
 			? (bSliding ? TEXT("Sliding") : IsCrouching() ? TEXT("Crouched (clearance)")
 				: IsSprinting() ? TEXT("Sprinting") : TEXT("Walking")) : GetMovementName();
 		GEngine->AddOnScreenDebugMessage(static_cast<uint64>(GetUniqueID()), 0.0f, FColor::Green,
@@ -240,7 +253,210 @@ void UFPParkourMovementComponent::TickComponent(float DeltaTime, ELevelTick Tick
 
 void UFPParkourMovementComponent::PhysCustom(float deltaTime, int32 Iterations)
 {
+	if (IsWallRunning())
+	{
+		PhysWallRun(deltaTime, Iterations);
+		return;
+	}
 	Super::PhysCustom(deltaTime, Iterations);
+}
 
-	// Reserved for future custom parkour modes; sprinting uses native walking physics.
+bool UFPParkourMovementComponent::IsSuitableWall(const FHitResult& Hit) const
+{
+	const UPrimitiveComponent* Surface = Hit.GetComponent();
+	return Hit.IsValidBlockingHit() && Surface && !IsWalkable(Hit)
+		&& FMath::Abs(Hit.ImpactNormal.Z) <= FMath::Clamp(WallRunMaxNormalZ, 0.0f, 0.3f)
+		// Moving/physics surfaces require base-relative movement, which this mode doesn't implement.
+		&& Surface->GetMobility() != EComponentMobility::Movable && !Surface->IsSimulatingPhysics()
+		&& !Cast<APawn>(Hit.GetActor());
+}
+
+bool UFPParkourMovementComponent::TraceWall(const FVector& Direction, FHitResult& Hit) const
+{
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(WallRun), false, CharacterOwner);
+	FCollisionResponseParams Response;
+	InitCollisionParams(Params, Response);
+	const FVector Start = UpdatedComponent->GetComponentLocation();
+	const float Reach = CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius()
+		+ FMath::Max(0.0f, WallDetectionDistance);
+	return GetWorld()->LineTraceSingleByChannel(Hit, Start, Start + Direction * Reach,
+		UpdatedComponent->GetCollisionObjectType(), Params, Response) && IsSuitableWall(Hit);
+}
+
+bool UFPParkourMovementComponent::TryStartWallRun()
+{
+	if (!HasValidData() || !IsFalling() || bWallRunUsed || IsCrouching() || bWantsToCrouch
+		|| !CharacterOwner->Controller || HasAnimRootMotion() || CurrentRootMotion.HasOverrideVelocity()
+		|| Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed)
+		|| Velocity.Z < -FMath::Max(0.0f, WallRunMaxEntryFallSpeed))
+	{
+		return false;
+	}
+
+	const FVector Travel = Velocity.GetSafeNormal2D();
+	// Enter while traveling forward, rather than when backing or strafing into a wall.
+	if (FVector::DotProduct(Travel, CharacterOwner->GetActorForwardVector()) <= 0.25f)
+	{
+		return false;
+	}
+	// Left/right are relative to travel, so looking around never breaks an active run.
+	const FVector Right = FVector::CrossProduct(FVector::UpVector, Travel);
+	FHitResult BestHit;
+	float BestDistance = UE_BIG_NUMBER;
+	for (const float Side : { -1.0f, 1.0f })
+	{
+		FHitResult Hit;
+		if (TraceWall(Right * Side, Hit))
+		{
+			const FVector Tangent = FVector::CrossProduct(FVector::UpVector, Hit.ImpactNormal).GetSafeNormal();
+			if (FMath::Abs(FVector::DotProduct(Travel, Tangent)) >= FMath::Clamp(WallRunMinAlignment, 0.0f, 1.0f)
+				&& Hit.Distance < BestDistance)
+			{
+				BestHit = Hit;
+				BestDistance = Hit.Distance;
+			}
+		}
+	}
+	if (!BestHit.IsValidBlockingHit())
+	{
+		return false;
+	}
+	WallRunNormal = BestHit.ImpactNormal.GetSafeNormal2D();
+	WallRunDirection = Travel;
+	// No velocity boost, vertical reset or position snap on entry.
+	SetMovementMode(MOVE_Custom, WallRunMode);
+	return IsWallRunning();
+}
+
+void UFPParkourMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
+{
+	if (deltaTime >= MIN_TICK_TIME && TryStartWallRun())
+	{
+		StartNewPhysics(deltaTime, Iterations);
+		return;
+	}
+	Super::PhysFalling(deltaTime, Iterations);
+}
+
+void UFPParkourMovementComponent::EndWallRun(float RemainingTime, int32 Iterations)
+{
+	// Preserve velocity and let native falling consume any unused simulation time.
+	SetMovementMode(MOVE_Falling);
+	StartNewPhysics(RemainingTime, Iterations);
+}
+
+void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
+{
+	if (!HasValidData() || DeltaTime < MIN_TICK_TIME)
+	{
+		return;
+	}
+
+	float RemainingTime = DeltaTime;
+	while (RemainingTime >= MIN_TICK_TIME && Iterations < MaxSimulationIterations && IsWallRunning())
+	{
+		FHitResult WallHit;
+		const float DurationLeft = FMath::Max(0.01f, WallRunMaxDuration) - WallRunElapsed;
+		const float CornerCos = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(WallRunMaxCornerAngle, 0.0f, 60.0f)));
+		const FVector Input = Acceleration / FMath::Max(1.0f, GetMaxAcceleration());
+		if (DurationLeft < MIN_TICK_TIME || !CharacterOwner->Controller || IsCrouching() || bWantsToCrouch
+			|| HasAnimRootMotion() || CurrentRootMotion.HasOverrideVelocity()
+			|| Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed)
+			|| FVector::DotProduct(Input, WallRunNormal) > FMath::Clamp(WallRunDetachInputThreshold, 0.1f, 1.0f)
+			|| !TraceWall(-WallRunNormal, WallHit)
+			|| FVector::DotProduct(WallHit.ImpactNormal.GetSafeNormal2D(), WallRunNormal) < CornerCos)
+		{
+			EndWallRun(RemainingTime, Iterations);
+			return;
+		}
+
+		++Iterations;
+		const float TimeTick = FMath::Min(GetSimulationTimeStep(RemainingTime, Iterations), DurationLeft);
+		RemainingTime -= TimeTick;
+		WallRunElapsed += TimeTick;
+		WallRunNormal = WallHit.ImpactNormal.GetSafeNormal2D();
+		FVector Tangent = FVector::CrossProduct(FVector::UpVector, WallRunNormal);
+		if (FVector::DotProduct(Tangent, WallRunDirection) < 0.0f)
+		{
+			Tangent *= -1.0f;
+		}
+		const FVector OldVelocity = Velocity;
+		const FVector Travel = Velocity.GetSafeNormal2D();
+		const float Angle = FMath::FindDeltaAngleRadians(FMath::Atan2(Travel.Y, Travel.X), FMath::Atan2(Tangent.Y, Tangent.X));
+		const float MaxTurn = FMath::DegreesToRadians(FMath::Max(0.0f, WallRunTurnRate)) * TimeTick;
+		WallRunDirection = Travel.RotateAngleAxis(FMath::RadiansToDegrees(FMath::Clamp(Angle, -MaxTurn, MaxTurn)), FVector::UpVector);
+		const float OpposingInput = FMath::Clamp(-FVector::DotProduct(Input, Tangent), 0.0f, 1.0f);
+		const float Speed = FMath::Max(0.0f, Velocity.Size2D() - OpposingInput * FMath::Max(0.0f, WallRunBrakingDeceleration) * TimeTick);
+		Velocity.X = WallRunDirection.X * Speed;
+		Velocity.Y = WallRunDirection.Y * Speed;
+		Velocity = NewFallVelocity(Velocity, FVector(0.0f, 0.0f, GetGravityZ()) * FMath::Clamp(WallRunGravityScale, 0.0f, 1.0f), TimeTick);
+
+		// Close the gap gradually using the same swept capsule movement as travel.
+		const float Gap = FMath::Max(0.0f, WallHit.Distance - CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius() - 2.0f);
+		const FVector Attraction = -WallRunNormal * FMath::Min(Gap, FMath::Max(0.0f, WallRunAttractionSpeed) * TimeTick);
+		const FVector Delta = (OldVelocity + Velocity) * (0.5f * TimeTick) + Attraction;
+		FHitResult Hit;
+		SafeMoveUpdatedComponent(Delta, UpdatedComponent->GetComponentQuat(), true, Hit);
+		if (!HasValidData() || !IsWallRunning())
+		{
+			if (HasValidData())
+			{
+				StartNewPhysics(RemainingTime, Iterations);
+			}
+			return;
+		}
+
+		if (Hit.IsValidBlockingHit())
+		{
+			// Handle both the first sweep and its slide: either can encounter the floor.
+			float UnusedTime = TimeTick * (1.0f - Hit.Time);
+			for (int32 Impact = 0; Impact < 2; ++Impact)
+			{
+				if (Velocity.Z <= 0.0f && IsValidLandingSpot(UpdatedComponent->GetComponentLocation(), Hit))
+				{
+					SetMovementMode(MOVE_Falling);
+					ProcessLanded(Hit, RemainingTime + UnusedTime, Iterations);
+					return;
+				}
+				HandleImpact(Hit, TimeTick, Delta);
+				if (!HasValidData() || !IsWallRunning())
+				{
+					if (HasValidData())
+					{
+						StartNewPhysics(RemainingTime + UnusedTime, Iterations);
+					}
+					return;
+				}
+				// Only collision removes velocity into a surface; entry/exit never clamp it.
+				if (FVector::DotProduct(Velocity, Hit.Normal) < 0.0f)
+				{
+					Velocity = ComputeSlideVector(Velocity, 1.0f, Hit.Normal, Hit);
+				}
+				if (!IsSuitableWall(Hit) || FVector::DotProduct(Hit.ImpactNormal.GetSafeNormal2D(), WallRunNormal) < CornerCos)
+				{
+					EndWallRun(RemainingTime + UnusedTime, Iterations);
+					return;
+				}
+				if (Impact == 1 || UnusedTime < MIN_TICK_TIME)
+				{
+					break;
+				}
+				const FVector SlideDelta = ComputeSlideVector(Delta, 1.0f - Hit.Time, Hit.Normal, Hit);
+				SafeMoveUpdatedComponent(SlideDelta, UpdatedComponent->GetComponentQuat(), true, Hit);
+				if (!HasValidData() || !IsWallRunning())
+				{
+					return;
+				}
+				UnusedTime *= 1.0f - Hit.Time;
+				if (!Hit.IsValidBlockingHit())
+				{
+					break;
+				}
+			}
+		}
+	}
+	if (IsWallRunning() && WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration))
+	{
+		EndWallRun(RemainingTime, Iterations);
+	}
 }

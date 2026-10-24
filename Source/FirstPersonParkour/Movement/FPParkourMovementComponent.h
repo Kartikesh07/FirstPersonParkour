@@ -32,6 +32,7 @@ public:
 	void StopSlide();
 	bool IsSliding() const { return bSliding; }
 	bool PrepareSlideJump();
+	bool IsWallRunning() const { return MovementMode == MOVE_Custom && CustomMovementMode == WallRunMode; }
 
 	/** A slide requires sprint input and at least this horizontal speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Slide", meta = (ClampMin = "0", Units = "cm/s"))
@@ -90,6 +91,52 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement|Sprinting", meta = (ClampMin = "0"))
 	float SprintingGroundFriction = 4.0f;
 
+	/** Extra reach beyond the capsule radius. Queries use the capsule's collision responses. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "cm"))
+	float WallDetectionDistance = 35.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "1", Units = "cm/s"))
+	float WallRunMinSpeed = 500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
+	float WallRunGravityScale = 0.3f;
+
+	/** One wall run per airborne period; only landing restores eligibility. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.01", Units = "s"))
+	float WallRunMaxDuration = 1.5f;
+
+	/** Maximum absolute surface-normal Z; rejects floors, ceilings and steeply inclined walls. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "0.3"))
+	float WallRunMaxNormalZ = 0.15f;
+
+	/** Minimum fraction of horizontal velocity traveling along the wall on entry. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
+	float WallRunMinAlignment = 0.8f;
+
+	/** Reject rapid descents instead of cancelling their vertical momentum on entry. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "cm/s"))
+	float WallRunMaxEntryFallSpeed = 500.0f;
+
+	/** Maximum change between adjacent wall normals; sharp corners detach. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "60", Units = "deg"))
+	float WallRunMaxCornerAngle = 35.0f;
+
+	/** Maximum horizontal direction change per second while following wall geometry. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "deg/s"))
+	float WallRunTurnRate = 120.0f;
+
+	/** Collision-swept inward correction speed; never snaps the capsule onto the wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "cm/s"))
+	float WallRunAttractionSpeed = 100.0f;
+
+	/** Opposing movement input slows the run without reversing it or adding speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float WallRunBrakingDeceleration = 700.0f;
+
+	/** Outward movement input above this fraction of full input detaches from the wall. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.1", ClampMax = "1"))
+	float WallRunDetachInputThreshold = 0.5f;
+
 	/** Optional local display of horizontal speed, world velocity and movement state. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
 	bool bShowMovementDebug = false;
@@ -100,8 +147,20 @@ protected:
 	virtual void CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration) override;
 	virtual void OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode) override;
 	virtual void PhysCustom(float deltaTime, int32 Iterations) override;
+	virtual void PhysFalling(float deltaTime, int32 Iterations) override;
 
 private:
+	static constexpr uint8 WallRunMode = 1;
+	bool IsSuitableWall(const FHitResult& Hit) const;
+	bool TraceWall(const FVector& Direction, FHitResult& Hit) const;
+	bool TryStartWallRun();
+	void PhysWallRun(float DeltaTime, int32 Iterations);
+	void EndWallRun(float RemainingTime, int32 Iterations);
+	FVector WallRunNormal = FVector::ZeroVector;
+	FVector WallRunDirection = FVector::ZeroVector;
+	float WallRunElapsed = 0.0f;
+	bool bWallRunUsed = false;
+
 	bool bSprintRequested = false;
 	bool bSlideRequested = false;
 	bool bSliding = false;
