@@ -27,6 +27,10 @@ public:
 	AFPPlayerCharacter(const FObjectInitializer& ObjectInitializer);
 
 protected:
+	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
+	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void NotifyControllerChanged() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -38,7 +42,9 @@ protected:
 	void Look(const FInputActionValue& Value);
 	void StartSprint();
 	void StopSprint();
-	void RemoveSprintMappingContext();
+	void StartSlide();
+	void StartJump();
+	void RemoveDefaultMappingContext();
 
 public:
 	/** Returns FirstPersonCameraComponent subobject. */
@@ -76,12 +82,25 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UInputAction> JumpAction;
 
-	/** Native Enhanced Input mapping, kept separate from the M0 asset context. */
-	UPROPERTY(VisibleDefaultsOnly, BlueprintReadOnly, Category = "Input")
+	/** IA_Sprint asset, mapped in IMC_Default. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> SprintAction;
 
-	UPROPERTY()
-	TObjectPtr<UInputMappingContext> SprintMappingContext;
+	/** IA_Slide asset, mapped in IMC_Default. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> SlideAction;
 
-	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> SprintInputSubsystem;
+	/** Camera drop from standing eye height, also used while awaiting standing clearance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0", Units = "cm"))
+	float SlideCameraLowering = 72.0f;
+
+	/** Exponential transition rate per second. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0.1"))
+	float SlideCameraTransitionSpeed = 12.0f;
+
+	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> InputSubsystem;
+
+private:
+	float StandingCameraZ = 64.0f;
+	float StandingCapsuleHalfHeight = 96.0f;
 };

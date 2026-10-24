@@ -24,6 +24,105 @@ UFPParkourMovementComponent::UFPParkourMovementComponent(const FObjectInitialize
 	AirControlBoostMultiplier = 1.0f;
 	FallingLateralFriction = 0.0f;
 	BrakingDecelerationFalling = 0.0f;
+	GetNavAgentPropertiesRef().bCanCrouch = true;
+	bCanWalkOffLedgesWhenCrouching = true;
+	// Native crouch clamps this to the capsule radius; editable through Character Movement.
+	SetCrouchedHalfHeight(48.0f);
+}
+
+void UFPParkourMovementComponent::StopSlide()
+{
+	bSlideRequested = false;
+	bSliding = false;
+	// Native state updates retry uncrouching until the standing capsule fits.
+	bWantsToCrouch = false;
+}
+
+bool UFPParkourMovementComponent::PrepareSlideJump()
+{
+	StopSlide();
+	if (IsCrouching())
+	{
+		UnCrouch();
+	}
+	return !IsCrouching();
+}
+
+void UFPParkourMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
+{
+	if (bSliding && (!IsMovingOnGround() || !IsCrouching() || !CharacterOwner->Controller
+		|| Velocity.Size2D() < FMath::Max(0.0f, SlideEndSpeed)))
+	{
+		StopSlide();
+	}
+	if (bSlideRequested)
+	{
+		bSlideRequested = false;
+		if (bSliding)
+		{
+			StopSlide();
+		}
+		else if (IsSprinting() && CurrentFloor.IsWalkableFloor()
+			&& Velocity.Size2D() >= FMath::Max(SlideMinSpeed, SlideEndSpeed))
+		{
+			bWantsToCrouch = true;
+			Crouch();
+			bSliding = IsCrouching();
+			if (!bSliding)
+			{
+				bWantsToCrouch = false;
+			}
+		}
+	}
+	Super::UpdateCharacterStateBeforeMovement(DeltaSeconds);
+}
+
+void UFPParkourMovementComponent::UpdateCharacterStateAfterMovement(float DeltaSeconds)
+{
+	if (bSliding && (!IsMovingOnGround() || !IsCrouching()
+		|| Velocity.Size2D() < FMath::Max(0.0f, SlideEndSpeed)))
+	{
+		StopSlide();
+	}
+	Super::UpdateCharacterStateAfterMovement(DeltaSeconds);
+}
+
+void UFPParkourMovementComponent::CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration)
+{
+	if (!bSliding || !IsMovingOnGround())
+	{
+		Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
+		return;
+	}
+	if (!HasValidData() || DeltaTime < MIN_TICK_TIME)
+	{
+		return;
+	}
+
+	FVector HorizontalVelocity(Velocity.X, Velocity.Y, 0.0f);
+	const FVector FloorGravity = FVector::VectorPlaneProject(
+		FVector(0.0f, 0.0f, GetGravityZ()), CurrentFloor.HitResult.ImpactNormal)
+		* FMath::Max(0.0f, SlideSlopeGravityScale);
+	const FVector SlopeAcceleration(FloorGravity.X, FloorGravity.Y, 0.0f);
+	const float Drag = FMath::Max(0.0f, SlideFriction);
+	// Exact constant-force/linear-drag integration for each native walking substep.
+	const float Decay = FMath::Exp(-Drag * DeltaTime);
+	HorizontalVelocity = HorizontalVelocity * Decay + SlopeAcceleration
+		* (Drag > UE_SMALL_NUMBER ? (1.0f - Decay) / Drag : DeltaTime);
+
+	const float Speed = HorizontalVelocity.Size2D();
+	if (Speed > UE_SMALL_NUMBER && !Acceleration.IsNearlyZero())
+	{
+		const float InputStrength = FMath::Clamp(Acceleration.Size2D() / FMath::Max(GetMaxAcceleration(), 1.0f), 0.0f, 1.0f);
+		const float Angle = FMath::FindDeltaAngleRadians(FMath::Atan2(HorizontalVelocity.Y, HorizontalVelocity.X),
+			FMath::Atan2(Acceleration.Y, Acceleration.X));
+		const float MaxTurn = FMath::DegreesToRadians(FMath::Max(0.0f, SlideSteeringRate)) * InputStrength * DeltaTime;
+		HorizontalVelocity = HorizontalVelocity.RotateAngleAxis(
+			FMath::RadiansToDegrees(FMath::Clamp(Angle, -MaxTurn, MaxTurn)), FVector::UpVector);
+	}
+	Velocity.X = HorizontalVelocity.X;
+	Velocity.Y = HorizontalVelocity.Y;
+	// PhysWalking continues to handle swept movement, floors, steps, walls and ledges.
 }
 
 float UFPParkourMovementComponent::GetMaxSpeed() const
@@ -51,6 +150,10 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 	{
 		FallingSpeedLimit = 0.0f;
 	}
+	if (!IsMovingOnGround())
+	{
+		StopSlide();
+	}
 	Super::OnMovementModeChanged(PreviousMovementMode, PreviousCustomMode);
 }
 
@@ -61,7 +164,8 @@ void UFPParkourMovementComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		&& GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
 	{
 		const FString State = IsFalling() ? TEXT("Falling") : IsMovingOnGround()
-			? (IsSprinting() ? TEXT("Sprinting") : TEXT("Walking")) : GetMovementName();
+			? (bSliding ? TEXT("Sliding") : IsCrouching() ? TEXT("Crouched (clearance)")
+				: IsSprinting() ? TEXT("Sprinting") : TEXT("Walking")) : GetMovementName();
 		GEngine->AddOnScreenDebugMessage(static_cast<uint64>(GetUniqueID()), 0.0f, FColor::Green,
 			FString::Printf(TEXT("Speed XY: %.1f cm/s | Velocity: %s | %s"), Velocity.Size2D(), *Velocity.ToCompactString(), *State));
 	}

@@ -9,8 +9,8 @@
 #include "InputActionValue.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
-#include "InputCoreTypes.h"
 #include "GameFramework/PlayerController.h"
+#include "Engine/World.h"
 
 AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UFPParkourMovementComponent>(ACharacter::CharacterMovementComponentName))
@@ -37,17 +37,67 @@ AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());
 	FirstPersonCameraComponent->SetRelativeLocation(FVector(0.0f, 0.0f, 64.0f));
 	FirstPersonCameraComponent->bUsePawnControlRotation = true;
+}
 
-	SprintAction = ObjectInitializer.CreateDefaultSubobject<UInputAction>(this, TEXT("SprintAction"));
-	SprintAction->ValueType = EInputActionValueType::Boolean;
-	SprintMappingContext = ObjectInitializer.CreateDefaultSubobject<UInputMappingContext>(this, TEXT("SprintMappingContext"));
+void AFPPlayerCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+	StandingCameraZ = FirstPersonCameraComponent->GetRelativeLocation().Z;
+	StandingCapsuleHalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+}
+
+void AFPPlayerCharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	FVector CameraLocation = FirstPersonCameraComponent->GetRelativeLocation();
+	const float CapsuleReduction = StandingCapsuleHalfHeight - GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+	const float TargetZ = StandingCameraZ + CapsuleReduction - (bIsCrouched ? SlideCameraLowering : 0.0f);
+	const float Alpha = 1.0f - FMath::Exp(-FMath::Max(0.1f, SlideCameraTransitionSpeed) * DeltaSeconds);
+	CameraLocation.Z = FMath::Lerp(CameraLocation.Z, TargetZ, Alpha);
+
+	// The smoothed eye can briefly extend beyond the shortened capsule. Keep it
+	// outside overhead geometry while the collision capsule passes underneath.
+	const FTransform CapsuleTransform = GetCapsuleComponent()->GetComponentTransform();
+	FHitResult CameraHit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(SlideCamera), false, this);
+	if ((bIsCrouched || !FMath::IsNearlyEqual(CameraLocation.Z, StandingCameraZ, 0.01f))
+		&& GetWorld()->SweepSingleByChannel(CameraHit, CapsuleTransform.GetLocation(),
+		CapsuleTransform.TransformPosition(CameraLocation), FQuat::Identity, ECC_Camera,
+		FCollisionShape::MakeSphere(6.0f), Params))
+	{
+		CameraLocation = CapsuleTransform.InverseTransformPosition(CameraHit.Location);
+	}
+	FirstPersonCameraComponent->SetRelativeLocation(CameraLocation);
+}
+
+void AFPPlayerCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	// Offset the native capsule-center shift so camera smoothing starts at its
+	// previous world height; capsule collision still changes immediately.
+	if (ParkourMovementComponent->IsMovingOnGround())
+	{
+		FirstPersonCameraComponent->SetRelativeLocation(
+			FirstPersonCameraComponent->GetRelativeLocation() + FVector(0.0f, 0.0f, HalfHeightAdjust));
+	}
+}
+
+void AFPPlayerCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	if (ParkourMovementComponent->IsMovingOnGround())
+	{
+		FirstPersonCameraComponent->SetRelativeLocation(
+			FirstPersonCameraComponent->GetRelativeLocation() - FVector(0.0f, 0.0f, HalfHeightAdjust));
+	}
 }
 
 void AFPPlayerCharacter::NotifyControllerChanged()
 {
 	// Possession changes must not leave sprint latched on the previous pawn.
 	StopSprint();
-	RemoveSprintMappingContext();
+	ParkourMovementComponent->StopSlide();
+	RemoveDefaultMappingContext();
 	Super::NotifyControllerChanged();
 
 	// Add input mapping context when possessed by a local player controller
@@ -58,12 +108,8 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 			if (DefaultMappingContext)
 			{
 				Subsystem->AddMappingContext(DefaultMappingContext, DefaultMappingPriority);
+				InputSubsystem = Subsystem;
 			}
-			// Map after archetype initialization so the binding references this pawn's action.
-			SprintMappingContext->UnmapAll();
-			SprintMappingContext->MapKey(SprintAction, EKeys::LeftShift);
-			Subsystem->AddMappingContext(SprintMappingContext, DefaultMappingPriority);
-			SprintInputSubsystem = Subsystem;
 		}
 	}
 }
@@ -71,17 +117,18 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 void AFPPlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	StopSprint();
-	RemoveSprintMappingContext();
+	ParkourMovementComponent->StopSlide();
+	RemoveDefaultMappingContext();
 	Super::EndPlay(EndPlayReason);
 }
 
-void AFPPlayerCharacter::RemoveSprintMappingContext()
+void AFPPlayerCharacter::RemoveDefaultMappingContext()
 {
-	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = SprintInputSubsystem.Get())
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = InputSubsystem.Get())
 	{
-		Subsystem->RemoveMappingContext(SprintMappingContext);
+		Subsystem->RemoveMappingContext(DefaultMappingContext);
 	}
-	SprintInputSubsystem.Reset();
+	InputSubsystem.Reset();
 }
 
 void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -90,13 +137,20 @@ void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
-		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartSprint);
-		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &AFPPlayerCharacter::StopSprint);
-		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Canceled, this, &AFPPlayerCharacter::StopSprint);
+		if (SprintAction)
+		{
+			EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartSprint);
+			EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &AFPPlayerCharacter::StopSprint);
+			EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Canceled, this, &AFPPlayerCharacter::StopSprint);
+		}
+		if (SlideAction)
+		{
+			EnhancedInputComponent->BindAction(SlideAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartSlide);
+		}
 		// Jump
 		if (JumpAction)
 		{
-			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
+			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartJump);
 			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 		}
 
@@ -122,6 +176,20 @@ void AFPPlayerCharacter::StartSprint()
 void AFPPlayerCharacter::StopSprint()
 {
 	ParkourMovementComponent->SetSprintRequested(false);
+}
+
+void AFPPlayerCharacter::StartSlide()
+{
+	ParkourMovementComponent->RequestSlide();
+}
+
+void AFPPlayerCharacter::StartJump()
+{
+	// Native UnCrouch performs the clearance query; blocked jumps remain low.
+	if (ParkourMovementComponent->PrepareSlideJump())
+	{
+		Jump();
+	}
 }
 
 void AFPPlayerCharacter::Move(const FInputActionValue& Value)
