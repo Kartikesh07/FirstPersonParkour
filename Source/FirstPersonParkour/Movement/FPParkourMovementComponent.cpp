@@ -340,6 +340,10 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 	{
 		StopGrapple(IsMovingOnGround() ? TEXT("landed: ground movement mode") : TEXT("movement mode changed"));
 	}
+	if (!IsWallRunning())
+	{
+		WallRunHighSpeedBraking = 0.0f;
+	}
 	const bool bWasWallRunning = PreviousMovementMode == MOVE_Custom && PreviousCustomMode == WallRunMode;
 	if (IsWallRunning())
 	{
@@ -351,6 +355,7 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 	}
 	if (IsMovingOnGround())
 	{
+		bGrappleWallRunHandoffPending = false;
 		WallRunElapsed = 0.0f;
 		WallRunNumber = 0;
 		bWallJumpRunPending = false;
@@ -469,9 +474,12 @@ void UFPParkourMovementComponent::DebugWallRun(const TCHAR* Message)
 	}
 	LastWallRunDebugMessage = Message;
 	NextWallRunDebugTime = Now + 0.5;
-	const FString Status = FString::Printf(TEXT("WallRun: %s | Mode %d/%d | XY %.0f/%.0f Z %.0f | run #%u %.2f/%.2f s | chain reset armed %d"),
-		Message, static_cast<int32>(MovementMode), CustomMovementMode, Velocity.Size2D(), WallRunMinSpeed,
-		Velocity.Z, WallRunNumber, WallRunElapsed, WallRunMaxDuration, bWallJumpRunPending ? 1 : 0);
+	const FString Status = FString::Printf(TEXT("WallRun: %s | Mode %d/%d | XY %.0f/%.0f Z %.0f | run #%u %.2f/%.2f s | chain reset armed %d | cooldown %.3f s surface locks %d | grapple release XY %.0f Z %.0f age %.2f s handoff %d | alignment %.2f tangent %.0f descent limit %.0f | excess braking %.0f cm/s/s -> %.0f"),
+		Message, static_cast<int32>(MovementMode), CustomMovementMode, Velocity.Size2D(), FMath::Max(500.0f, WallRunMinSpeed),
+		Velocity.Z, WallRunNumber, WallRunElapsed, WallRunMaxDuration, bWallJumpRunPending ? 1 : 0,
+		FMath::Max(0.0, WallRunReattachTime - Now), WallJumpRestrictions.Num(), GrappleWallRunReleaseVelocity.Size2D(), GrappleWallRunReleaseVelocity.Z,
+		GrappleWallRunReleaseTime >= 0.0 ? Now - GrappleWallRunReleaseTime : -1.0, IsGrappleWallRunHandoffActive() ? 1 : 0,
+		WallRunEntryAlignment, WallRunEntryTangentialSpeed, WallRunEntryFallSpeedLimit, WallRunHighSpeedBraking, WallRunComfortSpeed);
 	UE_LOG(LogParkourWallRun, Log, TEXT("%s: %s"), *GetNameSafe(CharacterOwner), *Status);
 	if (GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
 	{
@@ -527,15 +535,41 @@ bool UFPParkourMovementComponent::TraceWall(const FVector& Direction, FHitResult
 			Hit = ProbeHit;
 		}
 	}
+	// A capsule sweep catches partial-height walls and oblique contacts that the
+	// center/lower rays can miss. Normalize distance to the rays' center-distance
+	// convention, used by wall attraction and wall-jump clearance.
+	FHitResult CapsuleHit;
+	GetWorld()->SweepSingleByChannel(CapsuleHit, Center,
+		Center + Direction * FMath::Max(0.0f, WallDetectionDistance), UpdatedComponent->GetComponentQuat(),
+		UpdatedComponent->GetCollisionObjectType(), Capsule->GetCollisionShape(), Params, Response);
+	if (CapsuleHit.IsValidBlockingHit())
+	{
+		CapsuleHit.Distance += Capsule->GetScaledCapsuleRadius();
+		if (bDebug)
+		{
+			DrawDebugLine(GetWorld(), Center, CapsuleHit.ImpactPoint, FColor::Orange, false, 0.05f, 0, 2.0f);
+		}
+		Hit = CapsuleHit;
+		return IsSuitableWall(CapsuleHit);
+	}
 	return false;
 }
 
-bool UFPParkourMovementComponent::TryStartWallRun()
+bool UFPParkourMovementComponent::IsGrappleWallRunHandoffActive() const
+{
+	return bGrappleWallRunHandoffPending && GetWorld()
+		&& GetWorld()->GetTimeSeconds() - GrappleWallRunReleaseTime <= FMath::Max(0.0f, WallRunGrappleHandoffWindow);
+}
+
+bool UFPParkourMovementComponent::TryStartWallRun(const FHitResult* ImpactHit, const FVector* ApproachVelocity)
 {
 	if (!HasValidData() || !IsFalling() || bGrappling)
 	{
 		return false;
 	}
+	WallRunEntryAlignment = 0.0f;
+	WallRunEntryTangentialSpeed = 0.0f;
+	WallRunEntryFallSpeedLimit = FMath::Max(0.0f, WallRunMaxEntryFallSpeed);
 	const auto Reject = [this](const TCHAR* Reason)
 	{
 		DebugWallRun(Reason);
@@ -553,18 +587,19 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 	{
 		return Reject(TEXT("reject: root motion owns velocity"));
 	}
-	if (Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed))
+	const float MinimumSpeed = FMath::Max(500.0f, WallRunMinSpeed);
+	if (Velocity.ContainsNaN() || Velocity.Size2D() < MinimumSpeed)
 	{
 		return Reject(TEXT("reject: below minimum horizontal speed"));
 	}
-	if (Velocity.Z < -FMath::Max(0.0f, WallRunMaxEntryFallSpeed))
+	const FVector EntryVelocity = ApproachVelocity ? *ApproachVelocity : Velocity;
+	if (EntryVelocity.ContainsNaN())
 	{
-		return Reject(TEXT("reject: descending too fast"));
+		return Reject(TEXT("reject: invalid approach velocity"));
 	}
-
-	const FVector Travel = Velocity.GetSafeNormal2D();
+	const FVector Travel = EntryVelocity.GetSafeNormal2D();
 	// Enter while traveling forward, rather than when backing or strafing into a wall.
-	if (FVector::DotProduct(Travel, CharacterOwner->GetActorForwardVector()) <= 0.25f)
+	if (!IsGrappleWallRunHandoffActive() && FVector::DotProduct(Travel, CharacterOwner->GetActorForwardVector()) <= 0.25f)
 	{
 		return Reject(TEXT("reject: not traveling forward"));
 	}
@@ -573,38 +608,74 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 	FHitResult BestHit;
 	float BestDistance = UE_BIG_NUMBER;
 	const TCHAR* Rejection = TEXT("reject: no blocking side wall within reach");
+	const auto ConsiderWall = [&](const FHitResult& Hit)
+	{
+		if (!IsSuitableWall(Hit))
+		{
+			Rejection = GetWallRejectionReason(Hit);
+			return;
+		}
+		if (IsWallJumpSurfaceBlocked(Hit))
+		{
+			Rejection = TEXT("reject: jumped surface needs cooldown and capsule separation");
+			return;
+		}
+		// Check duration per candidate, after collision restrictions. An exhausted
+		// old run must not hide an eligible different-wall jump destination.
+		const bool bStartsNewRun = WallRunNumber == 0
+			|| (bWallJumpRunPending && !MatchesWallSurface(Hit, WallJumpRunSource));
+		if (!bStartsNewRun && WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration) - MIN_TICK_TIME)
+		{
+			Rejection = bWallJumpRunPending
+				? TEXT("reject: same-wall duration exhausted; jump did not authorize a same-wall reset")
+				: TEXT("reject: current run duration exhausted; no different-wall jump reset");
+			return;
+		}
+		const FVector Tangent = FVector::CrossProduct(FVector::UpVector, Hit.ImpactNormal).GetSafeNormal();
+		WallRunEntryAlignment = FMath::Abs(FVector::DotProduct(Travel, Tangent));
+		WallRunEntryTangentialSpeed = FMath::Abs(FVector::DotProduct(EntryVelocity, Tangent));
+		WallRunEntryFallSpeedLimit = FMath::Max(FMath::Max(0.0f, WallRunMaxEntryFallSpeed),
+			FMath::Min(FMath::Max(0.0f, WallRunMaxHighSpeedEntryFallSpeed),
+				WallRunEntryTangentialSpeed * FMath::Clamp(WallRunMaxEntryDescentRatio, 0.0f, 1.0f)));
+		if (FVector::DotProduct(Travel, Hit.ImpactNormal.GetSafeNormal2D()) > 0.15f)
+		{
+			Rejection = TEXT("reject: traveling away from wall");
+			return;
+		}
+		if (WallRunEntryAlignment < FMath::Clamp(WallRunMinAlignment, 0.5f, 1.0f))
+		{
+			Rejection = TEXT("reject: head-on/approach angle too steep");
+			return;
+		}
+		if (WallRunEntryTangentialSpeed < MinimumSpeed || FMath::Abs(FVector::DotProduct(Velocity, Tangent)) < MinimumSpeed)
+		{
+			Rejection = TEXT("reject: insufficient speed along wall");
+			return;
+		}
+		if (EntryVelocity.Z < -WallRunEntryFallSpeedLimit || Velocity.Z < -WallRunEntryFallSpeedLimit)
+		{
+			Rejection = TEXT("reject: descending too fast for tangential speed");
+			return;
+		}
+		if (Hit.Distance < BestDistance)
+		{
+			BestHit = Hit;
+			BestDistance = Hit.Distance;
+		}
+	};
+	if (ImpactHit && FVector::DistSquared(ImpactHit->Location, UpdatedComponent->GetComponentLocation())
+		<= FMath::Square(CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius()))
+	{
+		// This is an actual collision at the current capsule, not a future wall
+		// selected from a long predictive trace. Validate pre-deflection incidence.
+		ConsiderWall(*ImpactHit);
+	}
 	for (const float Side : { -1.0f, 1.0f })
 	{
 		FHitResult Hit;
 		if (TraceWall(Right * Side, Hit))
 		{
-			if (IsWallJumpSurfaceBlocked(Hit))
-			{
-				Rejection = TEXT("reject: jumped surface needs cooldown and capsule separation");
-				continue;
-			}
-			// Check duration per candidate, after collision restrictions. An exhausted
-			// old run must not hide an eligible different-wall jump destination.
-			const bool bStartsNewRun = WallRunNumber == 0
-				|| (bWallJumpRunPending && !MatchesWallSurface(Hit, WallJumpRunSource));
-			if (!bStartsNewRun && WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration) - MIN_TICK_TIME)
-			{
-				Rejection = bWallJumpRunPending
-					? TEXT("reject: same-wall duration exhausted; jump did not authorize a same-wall reset")
-					: TEXT("reject: current run duration exhausted; no different-wall jump reset");
-				continue;
-			}
-			const FVector Tangent = FVector::CrossProduct(FVector::UpVector, Hit.ImpactNormal).GetSafeNormal();
-			if (FMath::Abs(FVector::DotProduct(Travel, Tangent)) >= FMath::Clamp(WallRunMinAlignment, 0.0f, 1.0f)
-				&& Hit.Distance < BestDistance)
-			{
-				BestHit = Hit;
-				BestDistance = Hit.Distance;
-			}
-			else
-			{
-				Rejection = TEXT("reject: travel/wall alignment below minimum");
-			}
+			ConsiderWall(Hit);
 		}
 		else if (Hit.bBlockingHit)
 		{
@@ -615,6 +686,12 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 	{
 		return Reject(Rejection);
 	}
+	const FVector EntryTangent = FVector::CrossProduct(FVector::UpVector, BestHit.ImpactNormal).GetSafeNormal();
+	WallRunEntryAlignment = FMath::Abs(FVector::DotProduct(Travel, EntryTangent));
+	WallRunEntryTangentialSpeed = FMath::Abs(FVector::DotProduct(EntryVelocity, EntryTangent));
+	WallRunEntryFallSpeedLimit = FMath::Max(FMath::Max(0.0f, WallRunMaxEntryFallSpeed),
+		FMath::Min(FMath::Max(0.0f, WallRunMaxHighSpeedEntryFallSpeed),
+			WallRunEntryTangentialSpeed * FMath::Clamp(WallRunMaxEntryDescentRatio, 0.0f, 1.0f)));
 	WallRunNormal = BestHit.ImpactNormal.GetSafeNormal2D();
 	WallRunDirection = Travel;
 	const bool bInitialRun = WallRunNumber == 0;
@@ -634,6 +711,7 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 	// Consume the authorization on the first successful attachment, even if it
 	// resumes the same wall. Seam misses and mode changes cannot keep it alive.
 	bWallJumpRunPending = false;
+	bGrappleWallRunHandoffPending = false;
 	DebugWallRun(bInitialRun ? TEXT("duration reset: first run since landing")
 		: bStartsNewRun ? TEXT("duration reset: successful wall jump to a different surface")
 		: TEXT("reattached: duration retained; no legitimate different-wall jump reset"));
@@ -651,12 +729,84 @@ void UFPParkourMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
 		PhysGrapple(deltaTime, Iterations);
 		return;
 	}
-	if (deltaTime >= MIN_TICK_TIME && TryStartWallRun())
+	if (deltaTime < MIN_TICK_TIME || Iterations >= MaxSimulationIterations || !HasValidData())
 	{
-		StartNewPhysics(deltaTime, Iterations);
 		return;
 	}
-	Super::PhysFalling(deltaTime, Iterations);
+	if (!IsGrappleWallRunHandoffActive() && Velocity.Size2D() <= FMath::Max(500.0f, WallRunComfortSpeed))
+	{
+		// Preserve native air-control integration for ordinary jumping/falling.
+		// Extra travel sampling is needed only for fast traversal or rope handoff.
+		if (TryStartWallRun())
+		{
+			StartNewPhysics(deltaTime, Iterations);
+			return;
+		}
+		Super::PhysFalling(deltaTime, Iterations);
+		return;
+	}
+	float RemainingTime = deltaTime;
+	// Sample by actual travel distance, not render-frame count. Every slice still
+	// uses native swept falling, gravity, air control and landing response.
+	for (int32 Step = 0; Step < 64 && RemainingTime >= MIN_TICK_TIME; ++Step)
+	{
+		if (!HasValidData())
+		{
+			return;
+		}
+		if (!IsFalling() || bGrappling)
+		{
+			StartNewPhysics(RemainingTime, Iterations + 1);
+			return;
+		}
+		UpdateWallJumpRestrictions();
+		if (TryStartWallRun())
+		{
+			StartNewPhysics(RemainingTime, Iterations + 1);
+			return;
+		}
+		const float TravelTime = CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius() * 0.5f
+			/ FMath::Max(1.0, Velocity.Size());
+		const float TimeTick = FMath::Min3(RemainingTime, 1.0f / 60.0f, FMath::Max(MIN_TICK_TIME, TravelTime));
+		FallingWallImpact = FHitResult();
+		{
+			TGuardValue<bool> CaptureImpact(bCaptureFallingWallImpact, true);
+			Super::PhysFalling(TimeTick, Iterations);
+		}
+		RemainingTime -= TimeTick;
+		if (!HasValidData())
+		{
+			return;
+		}
+		if (IsFalling() && !bGrappling && FallingWallImpact.IsValidBlockingHit())
+		{
+			TryStartWallRun(&FallingWallImpact, &FallingWallApproachVelocity);
+		}
+		if (!IsFalling() || bGrappling)
+		{
+			StartNewPhysics(RemainingTime, Iterations + 1);
+			return;
+		}
+	}
+	if (RemainingTime >= MIN_TICK_TIME)
+	{
+		// Keep hitch work bounded; native falling still sweeps the entire remainder.
+		Super::PhysFalling(RemainingTime, Iterations);
+	}
+}
+
+void UFPParkourMovementComponent::HandleImpact(const FHitResult& Hit, float TimeSlice, const FVector& MoveDelta)
+{
+	if (bCaptureFallingWallImpact && HasValidData() && IsFalling() && !bGrappling
+		&& !FallingWallImpact.IsValidBlockingHit() && IsSuitableWall(Hit))
+	{
+		// Retain the approach before native collision removes inward velocity.
+		// Entry waits until native falling finishes this short slice, so no unused
+		// simulation time is lost and no mode changes occur inside impact callbacks.
+		FallingWallImpact = Hit;
+		FallingWallApproachVelocity = Velocity;
+	}
+	Super::HandleImpact(Hit, TimeSlice, MoveDelta);
 }
 
 bool UFPParkourMovementComponent::TryStartGrapple(const FVector& ViewLocation, const FVector& ViewDirection)
@@ -703,6 +853,7 @@ bool UFPParkourMovementComponent::TryStartGrapple(const FVector& ViewLocation, c
 	bGrappleClearanceLimited = false;
 	UpdateGrappleReelTarget();
 	bGrappling = IsFalling();
+	bGrappleWallRunHandoffPending = false;
 	return bGrappling;
 }
 
@@ -716,11 +867,14 @@ void UFPParkourMovementComponent::StopGrapple(const TCHAR* Reason)
 			UE_LOG(LogParkourGrapple, Log, TEXT("%s: %s"), *GetNameSafe(CharacterOwner), *LastGrappleReleaseStatus);
 		}
 		FallingSpeedLimit = FMath::Max(FallingSpeedLimit, Velocity.Size2D());
-		// Do not let a nearby wall immediately capture the retained release velocity.
+		// Releasing the rope is not a failed wall run. Do not impose a new generic
+		// cooldown or clear an existing wall-run cooldown / jumped-surface lock.
 		if (GetWorld())
 		{
-			WallRunReattachTime = FMath::Max(WallRunReattachTime,
-				GetWorld()->GetTimeSeconds() + FMath::Max(0.01f, WallRunReattachCooldown));
+			GrappleWallRunReleaseTime = GetWorld()->GetTimeSeconds();
+			GrappleWallRunReleaseVelocity = Velocity;
+			bGrappleWallRunHandoffPending = IsFalling() && !Velocity.ContainsNaN();
+			DebugWallRun(TEXT("grapple released: velocity retained; existing cooldown and surface locks retained"));
 		}
 	}
 	bGrappling = false;
@@ -1111,7 +1265,7 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		{
 			DetachReason = TEXT("detach: root motion owns velocity");
 		}
-		else if (Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed))
+		else if (Velocity.Size2D() < FMath::Max(500.0f, WallRunMinSpeed))
 		{
 			DetachReason = TEXT("detach: below minimum horizontal speed");
 		}
@@ -1126,7 +1280,15 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		}
 
 		++Iterations;
-		const float TimeTick = FMath::Min(GetSimulationTimeStep(RemainingTime, Iterations), DurationLeft);
+		float TimeTick = FMath::Min(GetSimulationTimeStep(RemainingTime, Iterations), DurationLeft);
+		if (Iterations < MaxSimulationIterations)
+		{
+			// Fast travel gets more contact/turn samples, without reaching for a
+			// distant future wall or bypassing the normal native iteration budget.
+			const float TravelTime = CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius()
+				/ FMath::Max(1.0, Velocity.Size());
+			TimeTick = FMath::Min3(TimeTick, 1.0f / 60.0f, FMath::Max(MIN_TICK_TIME, TravelTime));
+		}
 		const bool bHasContact = TraceWall(-WallRunNormal, WallHit);
 		if (bHasContact)
 		{
@@ -1142,7 +1304,6 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 				return;
 			}
 			WallRunNormal = WallHit.ImpactNormal.GetSafeNormal2D();
-			DebugWallRun(TEXT("active: valid wall contact"));
 		}
 		else
 		{
@@ -1168,10 +1329,21 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		const float MaxTurn = FMath::DegreesToRadians(FMath::Max(0.0f, WallRunTurnRate)) * TimeTick;
 		WallRunDirection = Travel.RotateAngleAxis(FMath::RadiansToDegrees(FMath::Clamp(Angle, -MaxTurn, MaxTurn)), FVector::UpVector);
 		const float OpposingInput = FMath::Clamp(-FVector::DotProduct(Input, Tangent), 0.0f, 1.0f);
-		const float Speed = FMath::Max(0.0f, Velocity.Size2D() - OpposingInput * FMath::Max(0.0f, WallRunBrakingDeceleration) * TimeTick);
+		const float TangentialSpeed = FMath::Abs(FVector::DotProduct(Velocity, Tangent));
+		const float ComfortableSpeed = FMath::Max(FMath::Max(500.0f, WallRunMinSpeed), WallRunComfortSpeed);
+		const float Excess = FMath::Max(0.0f, TangentialSpeed - ComfortableSpeed);
+		const float TangentialReduction = Excess * (1.0f - FMath::Exp(-FMath::Max(0.0f, WallRunHighSpeedBrakingRate) * TimeTick));
+		const float AdaptedSpeed = Velocity.Size2D() * (TangentialSpeed > UE_SMALL_NUMBER
+			? 1.0f - TangentialReduction / TangentialSpeed : 1.0f);
+		WallRunHighSpeedBraking = (Velocity.Size2D() - AdaptedSpeed) / TimeTick;
+		const float Speed = FMath::Max(0.0f, AdaptedSpeed - OpposingInput * FMath::Max(0.0f, WallRunBrakingDeceleration) * TimeTick);
 		Velocity.X = WallRunDirection.X * Speed;
 		Velocity.Y = WallRunDirection.Y * Speed;
 		Velocity = NewFallVelocity(Velocity, FVector(0.0f, 0.0f, GetGravityZ()) * FMath::Clamp(WallRunGravityScale, 0.0f, 1.0f), TimeTick);
+		if (bHasContact)
+		{
+			DebugWallRun(WallRunHighSpeedBraking > 1.0f ? TEXT("active: high-speed braking") : TEXT("active: valid wall contact"));
+		}
 
 		// Close the gap gradually using the same swept capsule movement as travel.
 		const float Gap = bHasContact

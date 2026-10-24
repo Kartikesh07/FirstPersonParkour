@@ -155,8 +155,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "cm"))
 	float WallDetectionDistance = 35.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "1", Units = "cm/s"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "500", Units = "cm/s"))
 	float WallRunMinSpeed = 500.0f;
+
+	/** Excess tangential speed decays toward this value; slower players receive no boost. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "500", Units = "cm/s"))
+	float WallRunComfortSpeed = 1100.0f;
+
+	/** Exponential excess-speed decay per second; 2.5 removes about 92 percent in one second. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0"))
+	float WallRunHighSpeedBrakingRate = 2.5f;
+
+	/** Brief momentum-based entry after release, independent of camera-facing direction. Never overrides collision locks. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "s"))
+	float WallRunGrappleHandoffWindow = 0.5f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
 	float WallRunGravityScale = 0.3f;
@@ -179,12 +191,19 @@ public:
 	float WallRunMaxNormalZ = 0.15f;
 
 	/** Minimum fraction of horizontal velocity traveling along the wall on entry. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
-	float WallRunMinAlignment = 0.8f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.5", ClampMax = "1"))
+	float WallRunMinAlignment = 0.65f;
 
 	/** Reject rapid descents instead of cancelling their vertical momentum on entry. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "cm/s"))
 	float WallRunMaxEntryFallSpeed = 500.0f;
+
+	/** Fast entries may descend at this fraction of tangential speed, bounded by the absolute high-speed limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
+	float WallRunMaxEntryDescentRatio = 0.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", Units = "cm/s"))
+	float WallRunMaxHighSpeedEntryFallSpeed = 1200.0f;
 
 	/** Maximum change between adjacent wall normals; sharp corners detach. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "60", Units = "deg"))
@@ -250,6 +269,7 @@ protected:
 	virtual void PhysCustom(float deltaTime, int32 Iterations) override;
 	virtual void PhysFalling(float deltaTime, int32 Iterations) override;
 	virtual FVector NewFallVelocity(const FVector& InitialVelocity, const FVector& Gravity, float DeltaTime) const override;
+	virtual void HandleImpact(const FHitResult& Hit, float TimeSlice, const FVector& MoveDelta) override;
 
 private:
 	bool IsGrapplePathClear(bool bCheckCapsulePath = false) const;
@@ -277,7 +297,19 @@ private:
 	bool TraceWall(const FVector& Direction, FHitResult& Hit) const;
 	bool IsWallRunDebugEnabled() const;
 	void DebugWallRun(const TCHAR* Message);
-	bool TryStartWallRun();
+	bool TryStartWallRun(const FHitResult* ImpactHit = nullptr, const FVector* ApproachVelocity = nullptr);
+	bool IsGrappleWallRunHandoffActive() const;
+	// Native falling impacts retain pre-deflection approach data for the next bounded slice.
+	bool bCaptureFallingWallImpact = false;
+	FHitResult FallingWallImpact;
+	FVector FallingWallApproachVelocity = FVector::ZeroVector;
+	bool bGrappleWallRunHandoffPending = false;
+	double GrappleWallRunReleaseTime = -1.0;
+	FVector GrappleWallRunReleaseVelocity = FVector::ZeroVector;
+	float WallRunEntryAlignment = 0.0f;
+	float WallRunEntryTangentialSpeed = 0.0f;
+	float WallRunEntryFallSpeedLimit = 500.0f;
+	float WallRunHighSpeedBraking = 0.0f;
 	void PhysWallRun(float DeltaTime, int32 Iterations);
 	void EndWallRun(float RemainingTime, int32 Iterations, const TCHAR* Reason);
 	struct FWallJumpRestriction
