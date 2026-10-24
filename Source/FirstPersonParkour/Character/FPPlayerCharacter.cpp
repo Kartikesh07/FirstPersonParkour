@@ -7,6 +7,9 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "InputAction.h"
+#include "InputMappingContext.h"
+#include "InputCoreTypes.h"
 #include "GameFramework/PlayerController.h"
 
 AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializer)
@@ -34,10 +37,17 @@ AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());
 	FirstPersonCameraComponent->SetRelativeLocation(FVector(0.0f, 0.0f, 64.0f));
 	FirstPersonCameraComponent->bUsePawnControlRotation = true;
+
+	SprintAction = ObjectInitializer.CreateDefaultSubobject<UInputAction>(this, TEXT("SprintAction"));
+	SprintAction->ValueType = EInputActionValueType::Boolean;
+	SprintMappingContext = ObjectInitializer.CreateDefaultSubobject<UInputMappingContext>(this, TEXT("SprintMappingContext"));
 }
 
 void AFPPlayerCharacter::NotifyControllerChanged()
 {
+	// Possession changes must not leave sprint latched on the previous pawn.
+	StopSprint();
+	RemoveSprintMappingContext();
 	Super::NotifyControllerChanged();
 
 	// Add input mapping context when possessed by a local player controller
@@ -49,8 +59,29 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 			{
 				Subsystem->AddMappingContext(DefaultMappingContext, DefaultMappingPriority);
 			}
+			// Map after archetype initialization so the binding references this pawn's action.
+			SprintMappingContext->UnmapAll();
+			SprintMappingContext->MapKey(SprintAction, EKeys::LeftShift);
+			Subsystem->AddMappingContext(SprintMappingContext, DefaultMappingPriority);
+			SprintInputSubsystem = Subsystem;
 		}
 	}
+}
+
+void AFPPlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	StopSprint();
+	RemoveSprintMappingContext();
+	Super::EndPlay(EndPlayReason);
+}
+
+void AFPPlayerCharacter::RemoveSprintMappingContext()
+{
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem = SprintInputSubsystem.Get())
+	{
+		Subsystem->RemoveMappingContext(SprintMappingContext);
+	}
+	SprintInputSubsystem.Reset();
 }
 
 void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -59,6 +90,9 @@ void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartSprint);
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &AFPPlayerCharacter::StopSprint);
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Canceled, this, &AFPPlayerCharacter::StopSprint);
 		// Jump
 		if (JumpAction)
 		{
@@ -78,6 +112,16 @@ void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 			EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AFPPlayerCharacter::Look);
 		}
 	}
+}
+
+void AFPPlayerCharacter::StartSprint()
+{
+	ParkourMovementComponent->SetSprintRequested(true);
+}
+
+void AFPPlayerCharacter::StopSprint()
+{
+	ParkourMovementComponent->SetSprintRequested(false);
 }
 
 void AFPPlayerCharacter::Move(const FInputActionValue& Value)

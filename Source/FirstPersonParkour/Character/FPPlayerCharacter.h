@@ -10,6 +10,7 @@ class UCameraComponent;
 class UFPParkourMovementComponent;
 class UInputMappingContext;
 class UInputAction;
+class UEnhancedInputLocalPlayerSubsystem;
 struct FInputActionValue;
 
 /**
@@ -28,12 +29,16 @@ public:
 protected:
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void NotifyControllerChanged() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	/** Handles camera-relative movement input (WASD). */
 	void Move(const FInputActionValue& Value);
 
 	/** Handles mouse look input (pitch and yaw). */
 	void Look(const FInputActionValue& Value);
+	void StartSprint();
+	void StopSprint();
+	void RemoveSprintMappingContext();
 
 public:
 	/** Returns FirstPersonCameraComponent subobject. */
@@ -70,4 +75,13 @@ protected:
 	/** Jump Input Action. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UInputAction> JumpAction;
+
+	/** Native Enhanced Input mapping, kept separate from the M0 asset context. */
+	UPROPERTY(VisibleDefaultsOnly, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> SprintAction;
+
+	UPROPERTY()
+	TObjectPtr<UInputMappingContext> SprintMappingContext;
+
+	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> SprintInputSubsystem;
 };
