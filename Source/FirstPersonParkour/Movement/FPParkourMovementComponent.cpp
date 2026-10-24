@@ -87,12 +87,21 @@ void UFPParkourMovementComponent::StopSlide()
 
 bool UFPParkourMovementComponent::PrepareSlideJump()
 {
-	StopSlide();
+	bSlideRequested = false;
 	if (IsCrouching())
 	{
+		bWantsToCrouch = false;
 		UnCrouch();
+		if (IsCrouching())
+		{
+			// A blocked takeoff must not end the slide and switch to native crouch
+			// braking/speed limits. Keep sliding while the short buffer retries.
+			bWantsToCrouch = bSliding;
+			return false;
+		}
 	}
-	return !IsCrouching();
+	StopSlide();
+	return true;
 }
 
 bool UFPParkourMovementComponent::TryWallJump()
@@ -386,6 +395,17 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 		StopSlide();
 	}
 	Super::OnMovementModeChanged(PreviousMovementMode, PreviousCustomMode);
+}
+
+void UFPParkourMovementComponent::SetPostLandedPhysics(const FHitResult& Hit)
+{
+	Super::SetPostLandedPhysics(Hit);
+	if (HasValidData() && IsMovingOnGround())
+	{
+		// Native landing has established the floor and reset jump counts. Consume
+		// before ProcessLanded simulates the remainder as walking (and brakes XY).
+		CharacterOwner->CheckJumpInput(0.0f);
+	}
 }
 
 void UFPParkourMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -725,6 +745,9 @@ bool UFPParkourMovementComponent::TryStartWallRun(const FHitResult* ImpactHit, c
 	DebugWallRun(bInitialRun ? TEXT("duration reset: first run since landing")
 		: bStartsNewRun ? TEXT("duration reset: successful wall jump to a different surface")
 		: TEXT("reattached: duration retained; no legitimate different-wall jump reset"));
+	// Entry validation and retained duration are complete. A slightly early press
+	// can now use fresh contact before any wall-run physics delays the takeoff.
+	CharacterOwner->CheckJumpInput(0.0f);
 	return true;
 }
 

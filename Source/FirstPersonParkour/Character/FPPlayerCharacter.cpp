@@ -11,7 +11,12 @@
 #include "InputMappingContext.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 #include "UObject/ConstructorHelpers.h"
+
+static TAutoConsoleVariable<int32> CVarParkourTransitionDebug(
+	TEXT("parkour.DebugTransitions"), 0, TEXT("Log accepted, consumed, expired and rejected jump transitions: 0 = off, 1 = on."));
+DEFINE_LOG_CATEGORY_STATIC(LogParkourTransitions, Log, All);
 
 AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UFPParkourMovementComponent>(ACharacter::CharacterMovementComponentName))
@@ -260,6 +265,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 	ParkourMovementComponent->StopGrapple(TEXT("controller changed"));
 	ParkourMovementComponent->StopSlide();
 	EndJump();
+	ClearBufferedJump(TEXT("rejected: controller changed"));
 	RemoveDefaultMappingContext();
 	Super::NotifyControllerChanged();
 
@@ -282,6 +288,7 @@ void AFPPlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	ParkourMovementComponent->StopGrapple(TEXT("end play"));
 	StopSprint();
 	EndJump();
+	ClearBufferedJump(TEXT("rejected: end play"));
 	ParkourMovementComponent->StopSlide();
 	RemoveDefaultMappingContext();
 	Super::EndPlay(EndPlayReason);
@@ -323,7 +330,7 @@ void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 		{
 			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartJump);
 			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AFPPlayerCharacter::EndJump);
-			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Canceled, this, &AFPPlayerCharacter::EndJump);
+			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Canceled, this, &AFPPlayerCharacter::CancelJump);
 		}
 
 		// Move (WASD)
@@ -353,7 +360,10 @@ void AFPPlayerCharacter::StartGrapple()
 		FRotator ViewRotation;
 		// Use the rendered first-person viewpoint, including existing camera offsets.
 		PlayerController->GetPlayerViewPoint(ViewLocation, ViewRotation);
-		ParkourMovementComponent->TryStartGrapple(ViewLocation, ViewRotation.Vector());
+		if (ParkourMovementComponent->TryStartGrapple(ViewLocation, ViewRotation.Vector()))
+		{
+			ClearBufferedJump(TEXT("rejected: grapple accepted movement ownership"));
+		}
 	}
 }
 
@@ -376,22 +386,111 @@ void AFPPlayerCharacter::StartJump()
 {
 	if (bJumpInputHeld)
 	{
+		DebugJumpTransition(TEXT("rejected: duplicate press while held"));
 		return;
 	}
 	bJumpInputHeld = true;
-	if (ParkourMovementComponent->IsWallRunning())
+	if (!Controller || ParkourMovementComponent->IsGrappling())
 	{
-		// Consume this press even if fresh contact/clearance rejects the jump.
-		// Never buffer it into a normal jump or a later wall attachment.
-		StopJumping();
-		ParkourMovementComponent->TryWallJump();
+		DebugJumpTransition(TEXT("rejected: no controller or active grapple"));
 		return;
 	}
-	// Native UnCrouch performs the clearance query; blocked jumps remain low.
-	if (ParkourMovementComponent->PrepareSlideJump())
+	StopJumping();
+	bJumpBuffered = true;
+	bBufferedWallJumpOnly = ParkourMovementComponent->IsWallRunning();
+	JumpBufferExpiresAt = GetWorld()->GetTimeSeconds() + FMath::Clamp(JumpBufferDuration, 0.0f, 0.5f);
+	LastJumpRejection.Reset();
+	DebugJumpTransition(TEXT("accepted: jump press buffered"));
+	CheckJumpInput(0.0f);
+}
+
+void AFPPlayerCharacter::CheckJumpInput(float DeltaTime)
+{
+	if (!bJumpBuffered)
 	{
-		Jump();
+		Super::CheckJumpInput(DeltaTime);
+		return;
 	}
+	if (!Controller || ParkourMovementComponent->IsGrappling()
+		|| (!ParkourMovementComponent->IsMovingOnGround() && !ParkourMovementComponent->IsFalling()
+			&& !ParkourMovementComponent->IsWallRunning()))
+	{
+		ClearBufferedJump(TEXT("rejected: movement ownership changed"));
+		return;
+	}
+	if (GetWorld()->GetTimeSeconds() > JumpBufferExpiresAt)
+	{
+		ClearBufferedJump(TEXT("expired: jump buffer"));
+		return;
+	}
+	const TCHAR* Rejection = TEXT("rejected: waiting for landing or valid wall attachment");
+	if (ParkourMovementComponent->IsWallRunning())
+	{
+		if (ParkourMovementComponent->TryWallJump())
+		{
+			ClearBufferedJump(TEXT("consumed: wall jump"));
+			return;
+		}
+		Rejection = TEXT("rejected: wall jump contact, clearance or surface lock; buffer retained");
+	}
+	else if (ParkourMovementComponent->IsMovingOnGround() && !bBufferedWallJumpOnly)
+	{
+		// Clear pending slide input and use native standing clearance before the native jump.
+		if (ParkourMovementComponent->PrepareSlideJump())
+		{
+			Jump();
+			Super::CheckJumpInput(DeltaTime);
+			if (bWasJumping)
+			{
+				ClearBufferedJump(TEXT("consumed: ground/slide jump"));
+				// A released tap may still consume its buffer, without latching jump hold.
+				if (!bJumpInputHeld)
+				{
+					StopJumping();
+				}
+				return;
+			}
+			StopJumping();
+		}
+		Rejection = TEXT("rejected: ground jump clearance or native jump eligibility; buffer retained");
+	}
+	else if (ParkourMovementComponent->IsMovingOnGround() && bBufferedWallJumpOnly)
+	{
+		ClearBufferedJump(TEXT("rejected: wall-jump press cannot become a landing jump"));
+		return;
+	}
+	if (LastJumpRejection != Rejection)
+	{
+		DebugJumpTransition(Rejection);
+		LastJumpRejection = Rejection;
+	}
+}
+
+void AFPPlayerCharacter::ClearBufferedJump(const TCHAR* Reason)
+{
+	if (bJumpBuffered)
+	{
+		DebugJumpTransition(Reason);
+	}
+	bJumpBuffered = false;
+	bBufferedWallJumpOnly = false;
+	JumpBufferExpiresAt = 0.0;
+	LastJumpRejection.Reset();
+}
+
+void AFPPlayerCharacter::DebugJumpTransition(const TCHAR* Event) const
+{
+	if (bShowTransitionDebug || CVarParkourTransitionDebug.GetValueOnGameThread() != 0)
+	{
+		UE_LOG(LogParkourTransitions, Log, TEXT("%s: %s | mode=%s | velocity=%s"),
+			*GetName(), Event, *ParkourMovementComponent->GetMovementName(), *ParkourMovementComponent->Velocity.ToCompactString());
+	}
+}
+
+void AFPPlayerCharacter::CancelJump()
+{
+	EndJump();
+	ClearBufferedJump(TEXT("rejected: input canceled"));
 }
 
 void AFPPlayerCharacter::EndJump()

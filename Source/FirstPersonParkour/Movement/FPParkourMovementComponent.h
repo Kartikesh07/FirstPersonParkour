@@ -282,6 +282,7 @@ protected:
 	virtual void UpdateCharacterStateAfterMovement(float DeltaSeconds) override;
 	virtual void CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration) override;
 	virtual void OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode) override;
+	virtual void SetPostLandedPhysics(const FHitResult& Hit) override;
 	virtual void PhysCustom(float deltaTime, int32 Iterations) override;
 	virtual void PhysFalling(float deltaTime, int32 Iterations) override;
 	virtual FVector NewFallVelocity(const FVector& InitialVelocity, const FVector& Gravity, float DeltaTime) const override;

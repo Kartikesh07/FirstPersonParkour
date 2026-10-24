@@ -26,6 +26,16 @@ class FIRSTPERSONPARKOUR_API AFPPlayerCharacter : public ACharacter
 public:
 	AFPPlayerCharacter(const FObjectInitializer& ObjectInitializer);
 	virtual void CalcCamera(float DeltaTime, struct FMinimalViewInfo& OutResult) override;
+	virtual void CheckJumpInput(float DeltaTime) override;
+	void ClearBufferedJump(const TCHAR* Reason);
+
+	/** One press may wait for landing, standing clearance, or fresh wall contact. Zero disables buffering. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Input", meta = (ClampMin = "0", ClampMax = "0.5", Units = "s"))
+	float JumpBufferDuration = 0.12f;
+
+	/** Accepted, consumed, expired and rejected jump transitions; also parkour.DebugTransitions 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
+	bool bShowTransitionDebug = false;
 
 	/** Called around native capsule resizing to compensate its actual displacement, including clearance adjustments. */
 	void RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation);
@@ -49,6 +59,8 @@ protected:
 	void StartSlide();
 	void StartJump();
 	void EndJump();
+	void CancelJump();
+	void DebugJumpTransition(const TCHAR* Event) const;
 	void StartGrapple();
 	void EndGrapple();
 	void RemoveDefaultMappingContext();
@@ -201,6 +213,10 @@ private:
 	FCameraFeedbackPulse WallJumpLandingPulse;
 	bool bWallJumpLandingPending = false;
 	bool bJumpInputHeld = false;
+	bool bJumpBuffered = false;
+	bool bBufferedWallJumpOnly = false;
+	double JumpBufferExpiresAt = 0.0;
+	FString LastJumpRejection;
 	void ApplyWallRunCameraEffects(float DeltaTime, FMinimalViewInfo& OutResult);
 	float SmoothedWallRunRoll = 0.0f;
 	float SmoothedWallRunFOV = 0.0f;
