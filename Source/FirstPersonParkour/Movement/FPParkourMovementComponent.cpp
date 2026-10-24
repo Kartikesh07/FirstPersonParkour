@@ -117,14 +117,17 @@ bool UFPParkourMovementComponent::TryWallJump()
 	const FVector Normal = WallHit.ImpactNormal.GetSafeNormal2D();
 	const FVector HorizontalVelocity(Velocity.X, Velocity.Y, 0.0f);
 	const FVector TangentialVelocity = FVector::VectorPlaneProject(HorizontalVelocity, Normal);
+	const float MinimumUpwardSpeed = FMath::Max(1.0f, WallJumpMinUpwardTakeoffSpeed);
+	const float UpwardSpeed = FMath::Max(MinimumUpwardSpeed, Velocity.Z + FMath::Max(0.0f, WallJumpUpwardImpulse));
 	FVector JumpVelocity = TangentialVelocity * FMath::Clamp(WallJumpMomentumRetention, 0.0f, 1.0f)
 		+ Normal * (FMath::Max(0.0f, FVector::DotProduct(HorizontalVelocity, Normal))
 			+ FMath::Max(0.0f, WallJumpOutwardImpulse))
-		+ FVector::UpVector * (Velocity.Z + FMath::Max(0.0f, WallJumpUpwardImpulse));
+		+ FVector::UpVector * UpwardSpeed;
 	JumpVelocity = ConstrainDirectionToPlane(JumpVelocity);
 	if (JumpVelocity.ContainsNaN() || FVector::DotProduct(JumpVelocity, Normal) <= UE_SMALL_NUMBER
-		|| JumpVelocity.Z <= UE_SMALL_NUMBER)
+		|| JumpVelocity.Z < MinimumUpwardSpeed - UE_KINDA_SMALL_NUMBER)
 	{
+		DebugWallRun(TEXT("wall jump rejected: movement constraint prevents safe upward takeoff"));
 		return false;
 	}
 
@@ -152,6 +155,7 @@ bool UFPParkourMovementComponent::TryWallJump()
 	bWallJumpRunPending = true;
 	CharacterOwner->StopJumping();
 	Velocity = JumpVelocity;
+	LastWallJumpTakeoffVelocity = JumpVelocity;
 	SetMovementMode(MOVE_Falling);
 	// A different wall can attach immediately if eligible. The jumped surface has its
 	// own stronger restriction. Duration refresh waits for a valid different-wall attachment.
@@ -343,6 +347,7 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 	if (!IsWallRunning())
 	{
 		WallRunHighSpeedBraking = 0.0f;
+		bWallRunVerticalStabilizing = false;
 	}
 	const bool bWasWallRunning = PreviousMovementMode == MOVE_Custom && PreviousCustomMode == WallRunMode;
 	if (IsWallRunning())
@@ -474,12 +479,15 @@ void UFPParkourMovementComponent::DebugWallRun(const TCHAR* Message)
 	}
 	LastWallRunDebugMessage = Message;
 	NextWallRunDebugTime = Now + 0.5;
-	const FString Status = FString::Printf(TEXT("WallRun: %s | Mode %d/%d | XY %.0f/%.0f Z %.0f | run #%u %.2f/%.2f s | chain reset armed %d | cooldown %.3f s surface locks %d | grapple release XY %.0f Z %.0f age %.2f s handoff %d | alignment %.2f tangent %.0f descent limit %.0f | excess braking %.0f cm/s/s -> %.0f"),
+	const FString Status = FString::Printf(TEXT("WallRun: %s | Mode %d/%d | XY %.0f/%.0f Z %.0f | run #%u %.2f/%.2f s | chain reset armed %d | cooldown %.3f s surface locks %d | grapple release XY %.0f Z %.0f age %.2f s handoff %d | alignment %.2f tangent %.0f descent limit %.0f | excess braking %.0f cm/s/s -> %.0f | entry Z %.0f vertical assist %s %.2f/%.2f s drift %.0f | jump takeoff %s"),
 		Message, static_cast<int32>(MovementMode), CustomMovementMode, Velocity.Size2D(), FMath::Max(500.0f, WallRunMinSpeed),
 		Velocity.Z, WallRunNumber, WallRunElapsed, WallRunMaxDuration, bWallJumpRunPending ? 1 : 0,
 		FMath::Max(0.0, WallRunReattachTime - Now), WallJumpRestrictions.Num(), GrappleWallRunReleaseVelocity.Size2D(), GrappleWallRunReleaseVelocity.Z,
 		GrappleWallRunReleaseTime >= 0.0 ? Now - GrappleWallRunReleaseTime : -1.0, IsGrappleWallRunHandoffActive() ? 1 : 0,
-		WallRunEntryAlignment, WallRunEntryTangentialSpeed, WallRunEntryFallSpeedLimit, WallRunHighSpeedBraking, WallRunComfortSpeed);
+		WallRunEntryAlignment, WallRunEntryTangentialSpeed, WallRunEntryFallSpeedLimit, WallRunHighSpeedBraking, WallRunComfortSpeed,
+		WallRunEntryVerticalVelocity, bWallRunVerticalStabilizing ? TEXT("active") : TEXT("off"),
+		FMath::Min(WallRunElapsed, FMath::Max(0.0f, WallRunVerticalStabilizationDuration)),
+		WallRunVerticalStabilizationDuration, WallRunMaxControlledDescentSpeed, *LastWallJumpTakeoffVelocity.ToCompactString());
 	UE_LOG(LogParkourWallRun, Log, TEXT("%s: %s"), *GetNameSafe(CharacterOwner), *Status);
 	if (GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
 	{
@@ -708,6 +716,8 @@ bool UFPParkourMovementComponent::TryStartWallRun(const FHitResult* ImpactHit, c
 		WallRunElapsed = 0.0f;
 		++WallRunNumber;
 	}
+	WallRunEntryVerticalVelocity = Velocity.Z;
+	bWallRunVerticalStabilizing = false;
 	// Consume the authorization on the first successful attachment, even if it
 	// resumes the same wall. Seam misses and mode changes cannot keep it alive.
 	bWallJumpRunPending = false;
@@ -1238,6 +1248,50 @@ void UFPParkourMovementComponent::EndWallRun(float RemainingTime, int32 Iteratio
 	StartNewPhysics(RemainingTime, Iterations);
 }
 
+void UFPParkourMovementComponent::ApplyWallRunVerticalControl(float PreviousVerticalVelocity, float GravityZ, float DeltaTime, bool bHasWallContact)
+{
+	bWallRunVerticalStabilizing = false;
+	if (!bHasWallContact || DeltaTime < MIN_TICK_TIME || Velocity.Z >= 0.0f || GravityZ > 0.0f)
+	{
+		// Upward motion and contact-grace intervals retain the existing gravity.
+		return;
+	}
+	const float DriftSpeed = FMath::Max(1.0f, WallRunMaxControlledDescentSpeed);
+	const float DownGravity = FMath::Max(0.0f, -GravityZ);
+	// If ascent ends inside this slice, apply descent drag only after the apex.
+	const float AscentTime = PreviousVerticalVelocity > 0.0f && DownGravity > UE_SMALL_NUMBER
+		? FMath::Min(DeltaTime, PreviousVerticalVelocity / DownGravity) : 0.0f;
+	float DownTime = DeltaTime - AscentTime;
+	float DownSpeed = FMath::Max(0.0f, -PreviousVerticalVelocity);
+	const float DragRate = DownGravity / DriftSpeed;
+	const auto IntegrateDescent = [DownGravity, DragRate](float Speed, float Time, float UpwardAcceleration)
+	{
+		// Exact constant gravity/force plus linear drag over this interval.
+		if (DragRate > UE_SMALL_NUMBER)
+		{
+			const float Equilibrium = (DownGravity - UpwardAcceleration) / DragRate;
+			return Equilibrium + (Speed - Equilibrium) * FMath::Exp(-DragRate * Time);
+		}
+		return Speed + (DownGravity - UpwardAcceleration) * Time;
+	};
+	const float EntryTimeLeft = FMath::Max(0.0f, WallRunVerticalStabilizationDuration
+		- (WallRunElapsed - DeltaTime + AscentTime));
+	const float AssistTime = FMath::Min(DownTime, EntryTimeLeft);
+	const float Strength = FMath::Max(0.0f, WallRunVerticalStabilizationStrength);
+	if (DownSpeed > DriftSpeed && AssistTime > 0.0f && Strength > 0.0f)
+	{
+		// Stop the integrated assist at the drift target, never at an upward speed.
+		// The window uses retained run time, so seam reattachment cannot refresh it.
+		DownSpeed = FMath::Max(DriftSpeed, IntegrateDescent(DownSpeed, AssistTime, Strength));
+		DownTime -= AssistTime;
+		bWallRunVerticalStabilizing = true;
+	}
+	DownSpeed = IntegrateDescent(DownSpeed, DownTime, 0.0f);
+	// Preserve any stricter native terminal-velocity limit. Only Z is affected;
+	// the resulting movement still uses the normal swept capsule and impact path.
+	Velocity.Z = FMath::Max(Velocity.Z, -DownSpeed);
+}
+
 void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 {
 	if (!HasValidData() || DeltaTime < MIN_TICK_TIME)
@@ -1339,7 +1393,9 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		const float Speed = FMath::Max(0.0f, AdaptedSpeed - OpposingInput * FMath::Max(0.0f, WallRunBrakingDeceleration) * TimeTick);
 		Velocity.X = WallRunDirection.X * Speed;
 		Velocity.Y = WallRunDirection.Y * Speed;
-		Velocity = NewFallVelocity(Velocity, FVector(0.0f, 0.0f, GetGravityZ()) * FMath::Clamp(WallRunGravityScale, 0.0f, 1.0f), TimeTick);
+		const float WallGravityZ = GetGravityZ() * FMath::Clamp(WallRunGravityScale, 0.0f, 1.0f);
+		Velocity = NewFallVelocity(Velocity, FVector(0.0f, 0.0f, WallGravityZ), TimeTick);
+		ApplyWallRunVerticalControl(OldVelocity.Z, WallGravityZ, TimeTick, bHasContact);
 		if (bHasContact)
 		{
 			DebugWallRun(WallRunHighSpeedBraking > 1.0f ? TEXT("active: high-speed braking") : TEXT("active: valid wall contact"));

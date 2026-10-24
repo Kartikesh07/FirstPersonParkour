@@ -173,6 +173,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
 	float WallRunGravityScale = 0.3f;
 
+	/** Additional upward braking acceleration during entry; only removes excess descent, never creates ascent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run|Vertical", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float WallRunVerticalStabilizationStrength = 4000.0f;
+
+	/** Terminal downward drift under wall-run gravity/vertical drag. Kept positive to avoid hovering. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run|Vertical", meta = (ClampMin = "1", Units = "cm/s"))
+	float WallRunMaxControlledDescentSpeed = 100.0f;
+
+	/** Entry-assist window in the current run's simulation time; ordinary reattachment does not restart it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run|Vertical", meta = (ClampMin = "0", Units = "s"))
+	float WallRunVerticalStabilizationDuration = 0.25f;
+
 	/** Time allowed per run. A wall jump to a different valid surface starts a new run;
 	 *  same-wall reattachments and detachments without a wall jump retain elapsed time. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.01", Units = "s"))
@@ -229,9 +241,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Jump", meta = (ClampMin = "0", Units = "cm/s"))
 	float WallJumpOutwardImpulse = 650.0f;
 
-	/** Added to current vertical velocity, preserving existing ascent/descent momentum. */
+	/** Added to vertical velocity, then bounded below by the minimum successful upward takeoff speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Jump", meta = (ClampMin = "0", Units = "cm/s"))
 	float WallJumpUpwardImpulse = 600.0f;
+
+	/** Descending into a wall must not cancel the jump. Successful takeoff also has to pass native capsule clearance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Jump", meta = (ClampMin = "1", Units = "cm/s"))
+	float WallJumpMinUpwardTakeoffSpeed = 600.0f;
 
 	/** Fraction of horizontal velocity along the wall retained at takeoff. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Jump", meta = (ClampMin = "0", ClampMax = "1"))
@@ -310,6 +326,10 @@ private:
 	float WallRunEntryTangentialSpeed = 0.0f;
 	float WallRunEntryFallSpeedLimit = 500.0f;
 	float WallRunHighSpeedBraking = 0.0f;
+	float WallRunEntryVerticalVelocity = 0.0f;
+	bool bWallRunVerticalStabilizing = false;
+	FVector LastWallJumpTakeoffVelocity = FVector::ZeroVector;
+	void ApplyWallRunVerticalControl(float PreviousVerticalVelocity, float GravityZ, float DeltaTime, bool bHasWallContact);
 	void PhysWallRun(float DeltaTime, int32 Iterations);
 	void EndWallRun(float RemainingTime, int32 Iterations, const TCHAR* Reason);
 	struct FWallJumpRestriction
