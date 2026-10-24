@@ -34,6 +34,27 @@ public:
 	bool PrepareSlideJump();
 	/** One attempt per input press; requires fresh contact with the active wall. */
 	bool TryWallJump();
+	/** Camera trace and capsule-clearance validation; never changes position or entry velocity. */
+	bool TryStartGrapple(const FVector& ViewLocation, const FVector& ViewDirection);
+	void StopGrapple();
+	bool IsGrappling() const { return bGrappling; }
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm"))
+	float GrappleRange = 3000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float GrapplePullAcceleration = 2400.0f;
+
+	/** Cap on grapple-generated speed. Faster inherited momentum is never truncated. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm/s"))
+	float GrappleMaxPullSpeed = 1800.0f;
+
+	/** Capsule-center distance to the surface anchor at which the grapple releases. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm"))
+	float GrappleArrivalDistance = 150.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple")
+	bool bShowGrappleDebug = true;
 	bool IsWallRunning() const { return MovementMode == MOVE_Custom && CustomMovementMode == WallRunMode; }
 	/** World-space outward wall normal, for visual effects only. Zero outside wall-running. */
 	FVector GetWallRunNormal() const { return IsWallRunning() ? WallRunNormal : FVector::ZeroVector; }
@@ -193,8 +214,17 @@ protected:
 	virtual void OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode) override;
 	virtual void PhysCustom(float deltaTime, int32 Iterations) override;
 	virtual void PhysFalling(float deltaTime, int32 Iterations) override;
+	virtual FVector NewFallVelocity(const FVector& InitialVelocity, const FVector& Gravity, float DeltaTime) const override;
 
 private:
+	bool IsGrapplePathClear() const;
+	bool IsGrappleAnchorValid() const;
+	bool bGrappling = false;
+	FVector GrappleAnchor = FVector::ZeroVector;
+	FVector GrappleNormal = FVector::ZeroVector;
+	TWeakObjectPtr<UPrimitiveComponent> GrappleSurface;
+	FTransform GrappleSurfaceTransform;
+
 	static constexpr uint8 WallRunMode = 1;
 	bool IsSuitableWall(const FHitResult& Hit) const;
 	const TCHAR* GetWallRejectionReason(const FHitResult& Hit) const;

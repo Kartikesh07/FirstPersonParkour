@@ -49,6 +49,8 @@ protected:
 	void StartSlide();
 	void StartJump();
 	void EndJump();
+	void StartGrapple();
+	void EndGrapple();
 	void RemoveDefaultMappingContext();
 
 public:
@@ -94,6 +96,10 @@ protected:
 	/** IA_Slide asset, mapped in IMC_Default. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	TObjectPtr<UInputAction> SlideAction;
+
+	/** IA_Grapple: press E to attach, release to detach. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputAction> GrappleAction;
 
 	/** Camera drop from standing eye height, also used while awaiting standing clearance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0", Units = "cm"))

@@ -11,11 +11,14 @@
 #include "InputMappingContext.h"
 #include "GameFramework/PlayerController.h"
 #include "Engine/World.h"
+#include "UObject/ConstructorHelpers.h"
 
 AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UFPParkourMovementComponent>(ACharacter::CharacterMovementComponentName))
 {
 	PrimaryActorTick.bCanEverTick = true;
+	static ConstructorHelpers::FObjectFinder<UInputAction> GrappleInput(TEXT("/Game/Input/IA_Grapple.IA_Grapple"));
+	GrappleAction = GrappleInput.Object;
 
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(40.0f, 96.0f);
@@ -254,6 +257,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 	bWallJumpLandingPending = false;
 	// Possession changes must not leave sprint latched on the previous pawn.
 	StopSprint();
+	EndGrapple();
 	ParkourMovementComponent->StopSlide();
 	EndJump();
 	RemoveDefaultMappingContext();
@@ -275,6 +279,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 
 void AFPPlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	EndGrapple();
 	StopSprint();
 	EndJump();
 	ParkourMovementComponent->StopSlide();
@@ -297,6 +302,12 @@ void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 
 	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
+		if (GrappleAction)
+		{
+			EnhancedInputComponent->BindAction(GrappleAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartGrapple);
+			EnhancedInputComponent->BindAction(GrappleAction, ETriggerEvent::Completed, this, &AFPPlayerCharacter::EndGrapple);
+			EnhancedInputComponent->BindAction(GrappleAction, ETriggerEvent::Canceled, this, &AFPPlayerCharacter::EndGrapple);
+		}
 		if (SprintAction)
 		{
 			EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartSprint);
@@ -332,6 +343,23 @@ void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 void AFPPlayerCharacter::StartSprint()
 {
 	ParkourMovementComponent->SetSprintRequested(true);
+}
+
+void AFPPlayerCharacter::StartGrapple()
+{
+	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
+	{
+		FVector ViewLocation;
+		FRotator ViewRotation;
+		// Use the rendered first-person viewpoint, including existing camera offsets.
+		PlayerController->GetPlayerViewPoint(ViewLocation, ViewRotation);
+		ParkourMovementComponent->TryStartGrapple(ViewLocation, ViewRotation.Vector());
+	}
+}
+
+void AFPPlayerCharacter::EndGrapple()
+{
+	ParkourMovementComponent->StopGrapple();
 }
 
 void AFPPlayerCharacter::StopSprint()
