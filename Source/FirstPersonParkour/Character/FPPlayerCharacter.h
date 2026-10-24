@@ -45,6 +45,7 @@ protected:
 	void StopSprint();
 	void StartSlide();
 	void StartJump();
+	void EndJump();
 	void RemoveDefaultMappingContext();
 
 public:
@@ -144,6 +145,7 @@ protected:
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> InputSubsystem;
 
 private:
+	bool bJumpInputHeld = false;
 	void ApplyWallRunCameraEffects(float DeltaTime, FMinimalViewInfo& OutResult);
 	float SmoothedWallRunRoll = 0.0f;
 	float SmoothedWallRunFOV = 0.0f;

@@ -91,6 +91,115 @@ bool UFPParkourMovementComponent::PrepareSlideJump()
 	return !IsCrouching();
 }
 
+bool UFPParkourMovementComponent::TryWallJump()
+{
+	if (!HasValidData() || !IsWallRunning() || !CharacterOwner->Controller
+		|| IsCrouching() || HasAnimRootMotion() || CurrentRootMotion.HasOverrideVelocity()
+		|| Velocity.ContainsNaN() || WallRunNormal.ContainsNaN() || !WallRunNormal.IsNormalized())
+	{
+		return false;
+	}
+
+	// Grace-time contact is sufficient to keep running, but never to create an impulse.
+	FHitResult WallHit;
+	if (!TraceWall(-WallRunNormal, WallHit) || IsWallJumpSurfaceBlocked(WallHit)
+		|| FVector::DotProduct(WallHit.ImpactNormal.GetSafeNormal2D(), WallRunNormal)
+			< FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(WallRunMaxCornerAngle, 0.0f, 60.0f))))
+	{
+		DebugWallRun(TEXT("wall jump rejected: no fresh active-wall contact"));
+		return false;
+	}
+
+	const FVector Normal = WallHit.ImpactNormal.GetSafeNormal2D();
+	const FVector HorizontalVelocity(Velocity.X, Velocity.Y, 0.0f);
+	const FVector TangentialVelocity = FVector::VectorPlaneProject(HorizontalVelocity, Normal);
+	FVector JumpVelocity = TangentialVelocity * FMath::Clamp(WallJumpMomentumRetention, 0.0f, 1.0f)
+		+ Normal * (FMath::Max(0.0f, FVector::DotProduct(HorizontalVelocity, Normal))
+			+ FMath::Max(0.0f, WallJumpOutwardImpulse))
+		+ FVector::UpVector * (Velocity.Z + FMath::Max(0.0f, WallJumpUpwardImpulse));
+	JumpVelocity = ConstrainDirectionToPlane(JumpVelocity);
+	if (JumpVelocity.ContainsNaN() || FVector::DotProduct(JumpVelocity, Normal) <= UE_SMALL_NUMBER
+		|| JumpVelocity.Z <= UE_SMALL_NUMBER)
+	{
+		return false;
+	}
+
+	// Check actual capsule clearance, including initial penetration and low ceilings.
+	// Do not teleport or pre-move: native PhysFalling sweeps the entire subsequent path.
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(WallJump), false, CharacterOwner);
+	FCollisionResponseParams Response;
+	InitCollisionParams(Params, Response);
+	const FVector Center = UpdatedComponent->GetComponentLocation();
+	FHitResult ClearanceHit;
+	if (GetWorld()->SweepSingleByChannel(ClearanceHit, Center, Center + JumpVelocity.GetSafeNormal() * 2.0f,
+		UpdatedComponent->GetComponentQuat(), UpdatedComponent->GetCollisionObjectType(),
+		CharacterOwner->GetCapsuleComponent()->GetCollisionShape(), Params, Response))
+	{
+		DebugWallRun(TEXT("wall jump rejected: capsule takeoff obstructed"));
+		return false;
+	}
+
+	FWallJumpRestriction& Restriction = WallJumpRestrictions.AddDefaulted_GetRef();
+	Restriction.Surface = WallHit.GetComponent();
+	Restriction.Normal = Normal;
+	Restriction.Point = WallHit.ImpactPoint;
+	Restriction.UnlockTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.01f, WallJumpSameWallCooldown);
+	CharacterOwner->StopJumping();
+	Velocity = JumpVelocity;
+	SetMovementMode(MOVE_Falling);
+	// A different wall can attach immediately if eligible. The jumped surface has its
+	// own stronger restriction, and the existing airborne duration is never reset here.
+	WallRunReattachTime = GetWorld()->GetTimeSeconds();
+	DebugWallRun(TEXT("wall jump: native falling; same surface locked"));
+	return true;
+}
+
+bool UFPParkourMovementComponent::IsWallJumpSurfaceBlocked(const FHitResult& Hit) const
+{
+	const FVector Normal = Hit.ImpactNormal.GetSafeNormal2D();
+	const float SameSurfaceCos = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(WallJumpSameSurfaceAngle, 0.0f, 60.0f)));
+	for (const FWallJumpRestriction& Restriction : WallJumpRestrictions)
+	{
+		if (FVector::DotProduct(Normal, Restriction.Normal) >= SameSurfaceCos
+			&& ((Restriction.Surface.IsValid() && Restriction.Surface.Get() == Hit.GetComponent())
+				|| FMath::Abs(FVector::DotProduct(Hit.ImpactPoint - Restriction.Point, Restriction.Normal))
+					<= FMath::Max(0.0f, WallJumpSurfacePlaneTolerance)))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void UFPParkourMovementComponent::UpdateWallJumpRestrictions()
+{
+	const FVector Center = UpdatedComponent->GetComponentLocation();
+	const UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent();
+	const float Separation = FMath::Max(1.0f, WallJumpMinSeparation);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(WallJumpSeparation), false, CharacterOwner);
+	FCollisionResponseParams Response;
+	InitCollisionParams(Params, Response);
+	for (int32 Index = WallJumpRestrictions.Num() - 1; Index >= 0; --Index)
+	{
+		FWallJumpRestriction& Restriction = WallJumpRestrictions[Index];
+		if (!Restriction.bHasSeparated
+			&& FVector::DotProduct(Center - Restriction.Point, Restriction.Normal)
+				>= Capsule->GetScaledCapsuleRadius() + Separation)
+		{
+			// A plane distance alone can falsely clear a curved wall or a corner.
+			// Require a full capsule-width corridor back toward the departed surface.
+			FHitResult Hit;
+			Restriction.bHasSeparated = !GetWorld()->SweepSingleByChannel(Hit, Center,
+				Center - Restriction.Normal * Separation, UpdatedComponent->GetComponentQuat(),
+				UpdatedComponent->GetCollisionObjectType(), Capsule->GetCollisionShape(), Params, Response);
+		}
+		if (Restriction.bHasSeparated && GetWorld()->GetTimeSeconds() >= Restriction.UnlockTime)
+		{
+			WallJumpRestrictions.RemoveAtSwap(Index);
+		}
+	}
+}
+
 void UFPParkourMovementComponent::UpdateCharacterStateBeforeMovement(float DeltaSeconds)
 {
 	if (bSliding && (!IsMovingOnGround() || !IsCrouching() || !CharacterOwner->Controller
@@ -225,6 +334,7 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 	{
 		WallRunElapsed = 0.0f;
 		WallRunReattachTime = 0.0;
+		WallJumpRestrictions.Reset();
 	}
 	if (IsFalling() && PreviousMovementMode != MOVE_Falling)
 	{
@@ -281,6 +391,11 @@ const TCHAR* UFPParkourMovementComponent::GetWallRejectionReason(const FHitResul
 	if (!Hit.IsValidBlockingHit() || !Surface)
 	{
 		return Hit.bStartPenetrating ? TEXT("probe starts penetrating") : TEXT("no blocking wall");
+	}
+	if (Hit.ImpactNormal.ContainsNaN() || !Hit.ImpactNormal.IsNormalized()
+		|| Hit.ImpactNormal.GetSafeNormal2D().IsNearlyZero())
+	{
+		return TEXT("invalid wall normal");
 	}
 	if (IsWalkable(Hit) || FMath::Abs(Hit.ImpactNormal.Z) > FMath::Clamp(WallRunMaxNormalZ, 0.0f, 0.3f))
 	{
@@ -430,6 +545,11 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 		FHitResult Hit;
 		if (TraceWall(Right * Side, Hit))
 		{
+			if (IsWallJumpSurfaceBlocked(Hit))
+			{
+				Rejection = TEXT("reject: jumped surface needs cooldown and capsule separation");
+				continue;
+			}
 			const FVector Tangent = FVector::CrossProduct(FVector::UpVector, Hit.ImpactNormal).GetSafeNormal();
 			if (FMath::Abs(FVector::DotProduct(Travel, Tangent)) >= FMath::Clamp(WallRunMinAlignment, 0.0f, 1.0f)
 				&& Hit.Distance < BestDistance)
@@ -461,6 +581,10 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 
 void UFPParkourMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
 {
+	if (HasValidData())
+	{
+		UpdateWallJumpRestrictions();
+	}
 	if (deltaTime >= MIN_TICK_TIME && TryStartWallRun())
 	{
 		StartNewPhysics(deltaTime, Iterations);
@@ -523,6 +647,11 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		const bool bHasContact = TraceWall(-WallRunNormal, WallHit);
 		if (bHasContact)
 		{
+			if (IsWallJumpSurfaceBlocked(WallHit))
+			{
+				EndWallRun(RemainingTime, Iterations, TEXT("detach: jumped surface still locked"));
+				return;
+			}
 			WallRunContactLostTime = 0.0f;
 			if (FVector::DotProduct(WallHit.ImpactNormal.GetSafeNormal2D(), WallRunNormal) < CornerCos)
 			{
@@ -608,6 +737,11 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 				if (FVector::DotProduct(Velocity, Hit.Normal) < 0.0f)
 				{
 					Velocity = ComputeSlideVector(Velocity, 1.0f, Hit.Normal, Hit);
+				}
+				if (IsWallJumpSurfaceBlocked(Hit))
+				{
+					EndWallRun(RemainingTime + UnusedTime, Iterations, TEXT("detach: collision with locked jumped surface"));
+					return;
 				}
 				if (!IsSuitableWall(Hit) || FVector::DotProduct(Hit.ImpactNormal.GetSafeNormal2D(), WallRunNormal) < CornerCos)
 				{

@@ -169,6 +169,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 	// Possession changes must not leave sprint latched on the previous pawn.
 	StopSprint();
 	ParkourMovementComponent->StopSlide();
+	EndJump();
 	RemoveDefaultMappingContext();
 	Super::NotifyControllerChanged();
 
@@ -189,6 +190,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 void AFPPlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	StopSprint();
+	EndJump();
 	ParkourMovementComponent->StopSlide();
 	RemoveDefaultMappingContext();
 	Super::EndPlay(EndPlayReason);
@@ -223,7 +225,8 @@ void AFPPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputC
 		if (JumpAction)
 		{
 			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &AFPPlayerCharacter::StartJump);
-			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
+			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &AFPPlayerCharacter::EndJump);
+			EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Canceled, this, &AFPPlayerCharacter::EndJump);
 		}
 
 		// Move (WASD)
@@ -257,11 +260,30 @@ void AFPPlayerCharacter::StartSlide()
 
 void AFPPlayerCharacter::StartJump()
 {
+	if (bJumpInputHeld)
+	{
+		return;
+	}
+	bJumpInputHeld = true;
+	if (ParkourMovementComponent->IsWallRunning())
+	{
+		// Consume this press even if fresh contact/clearance rejects the jump.
+		// Never buffer it into a normal jump or a later wall attachment.
+		StopJumping();
+		ParkourMovementComponent->TryWallJump();
+		return;
+	}
 	// Native UnCrouch performs the clearance query; blocked jumps remain low.
 	if (ParkourMovementComponent->PrepareSlideJump())
 	{
 		Jump();
 	}
+}
+
+void AFPPlayerCharacter::EndJump()
+{
+	bJumpInputHeld = false;
+	StopJumping();
 }
 
 void AFPPlayerCharacter::Move(const FInputActionValue& Value)
