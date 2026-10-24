@@ -8,6 +8,14 @@ class AFPPlayerCharacter;
 class UInstancedStaticMeshComponent;
 class UMaterialInterface;
 
+UENUM(BlueprintType)
+enum class EPFCourseDetail : uint8
+{
+	Low,
+	Medium,
+	High
+};
+
 /** Local +X course. Starting deck surface is local Z=0. Use yaw rotation and unit scale. */
 UCLASS(Blueprintable, ClassGroup=(Parkour), meta=(DisplayName="PF Parkour Course Builder"))
 class FIRSTPERSONPARKOUR_API APFParkourCourseBuilder : public AActor
@@ -81,6 +89,37 @@ public:
 	UPROPERTY(EditAnywhere, Category="Course|Grapple", meta=(ClampMin="1000", ClampMax="2400", Units="cm"))
 	float GrappleLandingLength = 1600.0f;
 
+	/** All visual modules are non-colliding, including Pawn/Visibility/Camera traces. */
+	UPROPERTY(EditAnywhere, Category="Course|Visuals")
+	bool bShowDecorations = true;
+	UPROPERTY(EditAnywhere, Category="Course|Visuals")
+	bool bShowBackgroundArchitecture = true;
+	/** Changes panel/rib spacing only; never changes the course layout. */
+	UPROPERTY(EditAnywhere, Category="Course|Visuals")
+	EPFCourseDetail DetailDensity = EPFCourseDetail::Medium;
+	UPROPERTY(EditAnywhere, Category="Course|Theme")
+	FLinearColor ShellColor = FLinearColor(0.82f, 0.87f, 0.90f);
+	UPROPERTY(EditAnywhere, Category="Course|Theme")
+	FLinearColor StructureColor = FLinearColor(0.025f, 0.038f, 0.055f);
+	UPROPERTY(EditAnywhere, Category="Course|Theme")
+	FLinearColor InsetColor = FLinearColor(0.22f, 0.29f, 0.34f);
+	UPROPERTY(EditAnywhere, Category="Course|Theme")
+	FLinearColor InteractiveColor = FLinearColor(0.015f, 0.72f, 0.95f);
+	UPROPERTY(EditAnywhere, Category="Course|Theme")
+	FLinearColor HazardColor = FLinearColor(1.0f, 0.12f, 0.025f);
+	/** Optional reusable parent materials. Color vector parameter is tinted by the theme.
+	 * Roughness/Metallic scalar parameters are set when exposed by the parent. */
+	UPROPERTY(EditAnywhere, Category="Course|Materials")
+	TObjectPtr<UMaterialInterface> ShellMaterial;
+	UPROPERTY(EditAnywhere, Category="Course|Materials")
+	TObjectPtr<UMaterialInterface> StructureMaterial;
+	UPROPERTY(EditAnywhere, Category="Course|Materials")
+	TObjectPtr<UMaterialInterface> InsetMaterial;
+	UPROPERTY(EditAnywhere, Category="Course|Materials")
+	TObjectPtr<UMaterialInterface> InteractiveMaterial;
+	UPROPERTY(EditAnywhere, Category="Course|Materials")
+	TObjectPtr<UMaterialInterface> HazardMaterial;
+
 	UPROPERTY(VisibleAnywhere, Category="Course|Resolved")
 	FString DesignReport;
 	UPROPERTY(VisibleAnywhere, Category="Course|Resolved", meta=(Units="cm"))
@@ -103,8 +142,30 @@ private:
 	TObjectPtr<UInstancedStaticMeshComponent> FinishZone;
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> BaseMaterial;
+	UPROPERTY(VisibleAnywhere, Category="Course|Meshes")
+	TObjectPtr<UInstancedStaticMeshComponent> ShellDetails;
+	UPROPERTY(VisibleAnywhere, Category="Course|Meshes")
+	TObjectPtr<UInstancedStaticMeshComponent> StructureDetails;
+	UPROPERTY(VisibleAnywhere, Category="Course|Meshes")
+	TObjectPtr<UInstancedStaticMeshComponent> InsetDetails;
+	UPROPERTY(VisibleAnywhere, Category="Course|Meshes")
+	TObjectPtr<UInstancedStaticMeshComponent> InteractiveDetails;
+	UPROPERTY(VisibleAnywhere, Category="Course|Meshes")
+	TObjectPtr<UInstancedStaticMeshComponent> HazardDetails;
+	/** Five shared transient MIDs, reused across gameplay and decorative batches. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<class UMaterialInstanceDynamic>> ThemeMaterials;
 
 	void Box(UInstancedStaticMeshComponent* Mesh, const FVector& Center, const FVector& Size);
+	void DetailBox(UInstancedStaticMeshComponent* Mesh, const FVector& Center, const FVector& Size);
+	void Beam(UInstancedStaticMeshComponent* Mesh, const FVector& Start, const FVector& End, float Breadth);
+	void DressDeck(float X, float Length);
+	void DressWall(float Begin, float End, float Side, float Separation, float Height);
+	void DressTunnel(float X, float Length, float Clearance);
+	void Gateway(float X, bool bFinish);
+	void BuildBackground();
+	void ApplyTheme();
+	float ModulePitch() const;
 	void Deck(float X, float Length, UInstancedStaticMeshComponent* Mesh = nullptr);
 	void MarkGap(float X, float Length);
 	float BuildWalls(float X, float Gap, float Separation, float Height);
@@ -112,4 +173,5 @@ private:
 	float Width = 900.0f;
 	float Thickness = 80.0f;
 	float WallApproachOffset = 52.0f;
+	float GatewayClearance = 600.0f;
 };
