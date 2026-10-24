@@ -80,6 +80,81 @@ void AFPPlayerCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult
 	}
 	FirstPersonCameraComponent->SetRelativeLocation(CameraLocation);
 	Super::CalcCamera(DeltaTime, OutResult);
+	ApplyWallRunCameraEffects(DeltaTime, OutResult);
+}
+
+void AFPPlayerCharacter::ApplyWallRunCameraEffects(float DeltaTime, FMinimalViewInfo& OutResult)
+{
+	const float Dt = FMath::Max(0.0f, DeltaTime);
+	const bool bWallRunning = bEnableWallRunCameraEffects && ParkourMovementComponent->IsWallRunning();
+	const FVector TowardWall = -ParkourMovementComponent->GetWallRunNormal();
+	const float SpeedAlpha = FMath::Clamp(ParkourMovementComponent->Velocity.Size2D()
+		/ FMath::Max(1.0f, ParkourMovementComponent->SprintSpeed), 0.0f, 1.0f);
+	const float BlendRate = bWallRunning ? WallRunCameraBlendInSpeed : WallRunCameraBlendOutSpeed;
+	const float BlendAlpha = 1.0f - FMath::Exp(-FMath::Max(0.1f, BlendRate) * Dt);
+	const FVector ViewRight = FRotationMatrix(FRotator(0.0f, OutResult.Rotation.Yaw, 0.0f)).GetUnitAxis(EAxis::Y);
+	const float WallSide = FMath::Clamp(FVector::DotProduct(TowardWall, ViewRight), -1.0f, 1.0f);
+	// Invert the wall-side sign for the intended first-person screen tilt.
+	// Looking around keeps the tilt tied to the wall's current screen side.
+	const float TargetRoll = bWallRunning ? -WallSide * FMath::Clamp(WallRunCameraTiltAngle, 0.0f, 20.0f) : 0.0f;
+	const float TargetFOV = bWallRunning ? SpeedAlpha * FMath::Clamp(WallRunCameraFOVBoost, 0.0f, 15.0f) : 0.0f;
+	const FVector TargetOffset = bWallRunning ? TowardWall * FMath::Clamp(WallRunCameraOffset, 0.0f, 8.0f) : FVector::ZeroVector;
+	SmoothedWallRunRoll = FMath::Lerp(SmoothedWallRunRoll, TargetRoll, BlendAlpha);
+	SmoothedWallRunFOV = FMath::Lerp(SmoothedWallRunFOV, TargetFOV, BlendAlpha);
+	SmoothedWallRunOffset = FMath::Lerp(SmoothedWallRunOffset, TargetOffset, BlendAlpha);
+	WallRunCameraMotionWeight = FMath::Lerp(WallRunCameraMotionWeight, bWallRunning ? SpeedAlpha : 0.0f, BlendAlpha);
+
+	const float EntryDuration = FMath::Clamp(WallRunCameraEntryDuration, 0.05f, 0.5f);
+	if (bWallRunning && !bWasCameraWallRunning)
+	{
+		WallRunCameraEntryAge = 0.0f;
+	}
+	bWasCameraWallRunning = bWallRunning;
+	WallRunCameraEntryAge = FMath::Min(EntryDuration, WallRunCameraEntryAge + Dt);
+	const float EntryPulse = FMath::Square(FMath::Sin(PI * WallRunCameraEntryAge / EntryDuration));
+	// Continuous phase avoids a bob discontinuity on reattachment. Both motion
+	// amplitude and frequency depend on smoothed speed, with no random jitter.
+	const float Frequency = FMath::Clamp(WallRunCameraMotionFrequency, 0.5f, 4.0f)
+		* FMath::Lerp(0.5f, 1.0f, WallRunCameraMotionWeight);
+	WallRunCameraMotionPhase = FMath::Fmod(WallRunCameraMotionPhase + 2.0f * PI * Frequency * Dt, 2.0f * PI);
+	const float ContactMotion = FMath::Sin(WallRunCameraMotionPhase)
+		* FMath::Clamp(WallRunCameraMotionAmplitude, 0.0f, 0.5f) * WallRunCameraMotionWeight;
+	const float EntryDip = EntryPulse * FMath::Clamp(WallRunCameraEntryImpulse, 0.0f, 2.0f);
+	const FVector VisualOffset = SmoothedWallRunOffset + FVector::UpVector * (ContactMotion - EntryDip);
+
+	// Preserve the existing slide-camera solution. Sweep the additional visual
+	// displacement from that safe eye, constraining it immediately at obstructions.
+	// Collision correction relaxes separately, so clearance never causes a snap.
+	WallRunCameraCollisionOffset *= FMath::Exp(-FMath::Max(0.1f, WallRunCameraBlendOutSpeed) * Dt);
+	const FVector BaseEye = OutResult.Location;
+	const FVector DesiredEye = BaseEye + VisualOffset + WallRunCameraCollisionOffset;
+	if (!DesiredEye.Equals(BaseEye, 0.001f))
+	{
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(WallRunCamera), false, this);
+		const FCollisionShape Probe = FCollisionShape::MakeSphere(FMath::Max(0.1f, SlideCameraProbeRadius));
+		FHitResult CameraHit;
+		bool bHit = GetWorld()->SweepSingleByChannel(CameraHit, BaseEye, DesiredEye, FQuat::Identity, ECC_Camera, Probe, Params);
+		// Wall detection follows capsule collision responses. Also respect those
+		// responses here for walls configured to block Pawn but ignore Camera.
+		FCollisionResponseParams Response;
+		GetCapsuleComponent()->InitSweepCollisionParams(Params, Response);
+		FHitResult PawnHit;
+		if (GetWorld()->SweepSingleByChannel(PawnHit, BaseEye, DesiredEye, FQuat::Identity,
+			GetCapsuleComponent()->GetCollisionObjectType(), Probe, Params, Response)
+			&& (!bHit || PawnHit.Time < CameraHit.Time))
+		{
+			CameraHit = PawnHit;
+			bHit = true;
+		}
+		OutResult.Location = bHit ? (CameraHit.bStartPenetrating ? BaseEye : CameraHit.Location) : DesiredEye;
+		WallRunCameraCollisionOffset += OutResult.Location - DesiredEye;
+	}
+
+	// Super::CalcCamera supplies a fresh base view each call. Apply offsets only
+	// to that view, never to control rotation, component rotation or stored FOV.
+	OutResult.Rotation.Roll = FRotator::NormalizeAxis(OutResult.Rotation.Roll + SmoothedWallRunRoll);
+	OutResult.FOV = FMath::Clamp(OutResult.FOV + SmoothedWallRunFOV, 5.0f, 170.0f);
+	OutResult.FirstPersonFOV = FMath::Clamp(OutResult.FirstPersonFOV + SmoothedWallRunFOV, 5.0f, 170.0f);
 }
 
 void AFPPlayerCharacter::RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation)

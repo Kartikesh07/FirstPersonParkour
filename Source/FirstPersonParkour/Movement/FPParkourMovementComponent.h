@@ -33,6 +33,8 @@ public:
 	bool IsSliding() const { return bSliding; }
 	bool PrepareSlideJump();
 	bool IsWallRunning() const { return MovementMode == MOVE_Custom && CustomMovementMode == WallRunMode; }
+	/** World-space outward wall normal, for visual effects only. Zero outside wall-running. */
+	FVector GetWallRunNormal() const { return IsWallRunning() ? WallRunNormal : FVector::ZeroVector; }
 
 	/** A slide requires sprint input and at least this horizontal speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Slide", meta = (ClampMin = "0", Units = "cm/s"))

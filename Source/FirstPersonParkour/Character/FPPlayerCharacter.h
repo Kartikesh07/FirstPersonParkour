@@ -106,9 +106,54 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0.1", Units = "cm"))
 	float SlideCameraProbeRadius = 6.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run")
+	bool bEnableWallRunCameraEffects = true;
+
+	/** Roll toward the wall, measured relative to the current view's right axis. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "20", Units = "deg"))
+	float WallRunCameraTiltAngle = 10.0f;
+
+	/** Maximum additive FOV at sprint speed; scales down with horizontal speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "15", Units = "deg"))
+	float WallRunCameraFOVBoost = 6.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "8", Units = "cm"))
+	float WallRunCameraOffset = 3.0f;
+
+	/** Exponential response rates per second, independent of frame rate. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.1"))
+	float WallRunCameraBlendInSpeed = 9.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.1"))
+	float WallRunCameraBlendOutSpeed = 7.0f;
+
+	/** A single smooth vertical dip, with zero displacement and slope at both ends. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
+	float WallRunCameraEntryImpulse = 0.65f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.05", ClampMax = "0.5", Units = "s"))
+	float WallRunCameraEntryDuration = 0.18f;
+
+	/** Tiny vertical contact motion; no procedural yaw/pitch shake. Zero disables it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "0.5", Units = "cm"))
+	float WallRunCameraMotionAmplitude = 0.12f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.5", ClampMax = "4", Units = "Hz"))
+	float WallRunCameraMotionFrequency = 2.4f;
+
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> InputSubsystem;
 
 private:
+	void ApplyWallRunCameraEffects(float DeltaTime, FMinimalViewInfo& OutResult);
+	float SmoothedWallRunRoll = 0.0f;
+	float SmoothedWallRunFOV = 0.0f;
+	float WallRunCameraMotionWeight = 0.0f;
+	float WallRunCameraMotionPhase = 0.0f;
+	float WallRunCameraEntryAge = 1.0f;
+	bool bWasCameraWallRunning = false;
+	FVector SmoothedWallRunOffset = FVector::ZeroVector;
+	FVector WallRunCameraCollisionOffset = FVector::ZeroVector;
+
 	FVector StandingCameraLocation = FVector(0.0f, 0.0f, 64.0f);
 	float SmoothedCameraZ = 64.0f;
 	FVector CameraCollisionOffset = FVector::ZeroVector;
