@@ -1,0 +1,44 @@
+# Visual Studio / Rider / VS Code cache & temp files
+.vs/
+.idea/
+.vscode/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.VC.VC.opendb
+*.opendb
+
+# Unreal Engine build, binary, and cache directories
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Build folder (ignore generated build outputs while preserving custom batch scripts if any)
+Build/*
+!Build/BatchFiles/
+
+# Plugin temporary files
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+
+# User / Developer specific content
+Content/Developers/
+Content/Collections/
+
+# Cooked & Packaged output
+Packages/
+Package/
+Cooked/
+
+# Crash reports and logs
+CrashReportClient/
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
