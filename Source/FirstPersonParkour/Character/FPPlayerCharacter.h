@@ -89,11 +89,69 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Parkour|Grapple Visuals")
 	TObjectPtr<UFPGrappleCableComponent> GrappleCableComponent;
 
+	/** Master feedback envelope. Stance eye-height and safety sweeps remain active. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Unified")
+	bool bEnableCameraEffects = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Unified", meta=(ClampMin="0", ClampMax="2"))
+	float CameraEffectsIntensity = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Unified", meta=(ClampMin="0.5", ClampMax="12", Units="Hz"))
+	float CameraPositionFrequency = 4.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Unified", meta=(ClampMin="0.5", ClampMax="12", Units="Hz"))
+	float CameraRotationFrequency = 3.5f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Unified", meta=(ClampMin="0.5", ClampMax="8", Units="Hz"))
+	float CameraFOVFrequency = 2.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Unified", meta=(ClampMin="0.7", ClampMax="2"))
+	float CameraSpringDampingRatio = 0.95f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Comfort", meta=(ClampMin="0", ClampMax="15", Units="cm"))
+	float CameraMaxPositionOffset = 8.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Comfort", meta=(ClampMin="0", ClampMax="6", Units="deg"))
+	float CameraMaxPitch = 3.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Comfort", meta=(ClampMin="0", ClampMax="15", Units="deg"))
+	float CameraMaxRoll = 12.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Comfort", meta=(ClampMin="0", ClampMax="20", Units="deg"))
+	float CameraMaxFOVBoost = 12.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Comfort", meta=(ClampMin="50", ClampMax="120", Units="deg"))
+	float CameraMinFOV = 70.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Comfort", meta=(ClampMin="70", ClampMax="140", Units="deg"))
+	float CameraMaxFOV = 110.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Comfort", meta=(ClampMin="1", ClampMax="30"))
+	float CameraCollisionReleaseSpeed = 10.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia")
+	bool bEnableCameraInertia = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia", meta=(ClampMin="0", ClampMax="4", Units="cm"))
+	float CameraInertiaDistance = 1.6f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia", meta=(ClampMin="0", ClampMax="3", Units="deg"))
+	float CameraInertiaPitch = 1.1f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia", meta=(ClampMin="0", ClampMax="4", Units="deg"))
+	float CameraStrafeRoll = 1.8f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia", meta=(ClampMin="0", ClampMax="3", Units="deg"))
+	float CameraTurnRoll = 1.3f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia", meta=(ClampMin="1", Units="cm/s^2"))
+	float CameraInertiaFullAcceleration = 2200.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia", meta=(ClampMin="1", Units="deg/s"))
+	float CameraTurnFullSpeed = 240.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Inertia", meta=(ClampMin="1", ClampMax="30"))
+	float CameraAccelerationFilterSpeed = 12.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Slide")
+	bool bEnableSlideCameraEffects = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Slide", meta=(ClampMin="0", ClampMax="5", Units="deg"))
+	float SlideCameraPitch = 3.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Slide", meta=(ClampMin="0", ClampMax="4", Units="cm"))
+	float SlideCameraForwardLean = 1.8f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Airborne", meta=(ClampMin="0", ClampMax="3", Units="deg"))
+	float AirborneCameraPitch = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Landing", meta=(ClampMin="0", ClampMax="3", Units="deg"))
+	float LandingCameraPitch = 1.2f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Camera|Grapple", meta=(ClampMin="0", ClampMax="4", Units="deg"))
+	float GrappleSwingCameraRoll = 2.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple")
 	bool bEnableGrappleCameraEffects = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
-	float GrappleAttachCameraImpulse = 0.65f;
+	float GrappleAttachCameraImpulse = 1.8f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "5", Units = "deg"))
 	float GrappleAttachFOVPulse = 1.5f;
@@ -102,7 +160,7 @@ protected:
 	float GrappleAttachFeedbackDuration = 0.22f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
-	float GrappleReleaseCameraImpulse = 0.45f;
+	float GrappleReleaseCameraImpulse = 1.2f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "5", Units = "deg"))
 	float GrappleReleaseFOVPulse = 1.0f;
@@ -110,12 +168,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0.05", ClampMax = "1", Units = "s"))
 	float GrappleReleaseFeedbackDuration = 0.2f;
 
-	/** Smooth tension lean only; no oscillation or random shake. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "1", Units = "cm"))
-	float GrappleTensionCameraOffset = 0.35f;
+	/** Taut-rope positional lean, weighted by swing speed and measured inward acceleration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "4", Units = "cm"))
+	float GrappleTensionCameraOffset = 1.8f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "3", Units = "deg"))
-	float GrappleTensionFOVBoost = 0.75f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "12", Units = "deg"))
+	float GrappleTensionFOVBoost = 9.0f;
 
 	/** Visual response rate per second, for both tension build and recovery. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0.1"))
@@ -159,7 +217,7 @@ protected:
 
 	/** Camera drop from standing eye height, also used while awaiting standing clearance. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0", Units = "cm"))
-	float SlideCameraLowering = 72.0f;
+	float SlideCameraLowering = 88.0f;
 
 	/** Exponential lowering rate per second; 10 reaches 95 percent of the drop in 0.3 seconds. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0.1"))
@@ -176,9 +234,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint")
 	bool bEnableSprintFOV = true;
 
-	/** Additive FOV from actual horizontal speed above WalkSpeed, including slide/air momentum. */
+	/** Speed FOV candidate; combined with other states by maximum, never summed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint", meta = (ClampMin = "0", ClampMax = "15", Units = "deg"))
-	float SprintCameraFOVBoost = 5.0f;
+	float SprintCameraFOVBoost = 8.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint", meta = (ClampMin = "0.1"))
 	float SprintCameraBlendInSpeed = 5.0f;
@@ -189,16 +247,16 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint")
 	bool bEnableSprintMotion = true;
 
-	/** Vertical footsteps only while grounded and standing. No pitch, yaw or roll changes. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint", meta = (ClampMin = "0", ClampMax = "0.5", Units = "cm"))
-	float SprintCameraMotionAmplitude = 0.18f;
+	/** Distance-driven vertical and lateral gait, only while grounded and standing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint", meta = (ClampMin = "0", ClampMax = "3", Units = "cm"))
+	float SprintCameraMotionAmplitude = 1.2f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint", meta = (ClampMin = "0.5", ClampMax = "4", Units = "Hz"))
-	float SprintCameraMotionFrequency = 2.6f;
+	float SprintCameraMotionFrequency = 1.8f;
 
 	/** Small backward translation along horizontal travel, blended through acceleration/deceleration. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint", meta = (ClampMin = "0", ClampMax = "1", Units = "cm"))
-	float SprintCameraMomentumOffset = 0.3f;
+	float SprintCameraMomentumOffset = 0.6f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sprint", meta = (ClampMin = "0.1"))
 	float SprintCameraMotionBlendSpeed = 8.0f;
@@ -206,8 +264,8 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Jump")
 	bool bEnableJumpCameraFeedback = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Jump", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
-	float JumpCameraImpulse = 0.55f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Jump", meta = (ClampMin = "0", ClampMax = "6", Units = "cm"))
+	float JumpCameraImpulse = 2.8f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Jump", meta = (ClampMin = "0.1", ClampMax = "0.6", Units = "s"))
 	float JumpCameraFeedbackDuration = 0.28f;
@@ -216,8 +274,8 @@ protected:
 	bool bEnableAirborneCameraFeedback = true;
 
 	/** Downward during ascent, upward during descent; crosses zero smoothly at the apex. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Airborne", meta = (ClampMin = "0", ClampMax = "1", Units = "cm"))
-	float AirborneCameraOffset = 0.3f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Airborne", meta = (ClampMin = "0", ClampMax = "3", Units = "cm"))
+	float AirborneCameraOffset = 1.4f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Airborne", meta = (ClampMin = "1", Units = "cm/s"))
 	float AirborneCameraFullEffectSpeed = 700.0f;
@@ -228,18 +286,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Landing")
 	bool bEnableLandingCameraFeedback = true;
 
-	/** Wall-jump landings retain their existing profile and use the same non-stacking pulse. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Landing", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
-	float LandingCameraIntensity = 1.1f;
+	/** Maximum compression target. All landings share one replaceable transition envelope. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Landing", meta = (ClampMin = "0", ClampMax = "10", Units = "cm"))
+	float LandingCameraIntensity = 6.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Landing", meta = (ClampMin = "0.1", ClampMax = "0.6", Units = "s"))
-	float LandingCameraRecoveryDuration = 0.26f;
+	float LandingCameraRecoveryDuration = 0.36f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Landing", meta = (ClampMin = "0", Units = "cm/s"))
-	float LandingCameraMinSpeed = 180.0f;
+	float LandingCameraMinSpeed = 140.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Landing", meta = (ClampMin = "1", Units = "cm/s"))
-	float LandingCameraFullEffectSpeed = 1000.0f;
+	float LandingCameraFullEffectSpeed = 850.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0.1", Units = "cm"))
 	float SlideCameraProbeRadius = 6.0f;
@@ -249,16 +307,16 @@ protected:
 
 	/** Roll toward the wall, measured relative to the current view's right axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "20", Units = "deg"))
-	float WallRunCameraTiltAngle = 10.0f;
+	float WallRunCameraTiltAngle = 9.0f;
 
-	/** Maximum additive FOV at sprint speed; scales down with horizontal speed. */
+	/** Wall-run FOV candidate at sprint speed; never added to sprint FOV. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "15", Units = "deg"))
-	float WallRunCameraFOVBoost = 6.0f;
+	float WallRunCameraFOVBoost = 8.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "8", Units = "cm"))
 	float WallRunCameraOffset = 3.0f;
 
-	/** Exponential response rates per second, independent of frame rate. */
+	/** State-weight response rates per second; the unified spring handles the final pose. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.1"))
 	float WallRunCameraBlendInSpeed = 9.0f;
 
@@ -267,14 +325,14 @@ protected:
 
 	/** A single smooth vertical dip, with zero displacement and slope at both ends. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
-	float WallRunCameraEntryImpulse = 0.65f;
+	float WallRunCameraEntryImpulse = 1.5f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.05", ClampMax = "0.5", Units = "s"))
 	float WallRunCameraEntryDuration = 0.18f;
 
-	/** Tiny vertical contact motion; no procedural yaw/pitch shake. Zero disables it. */
+	/** Distance-driven wall contact texture. Zero disables it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0", ClampMax = "0.5", Units = "cm"))
-	float WallRunCameraMotionAmplitude = 0.12f;
+	float WallRunCameraMotionAmplitude = 0.3f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.5", ClampMax = "4", Units = "Hz"))
 	float WallRunCameraMotionFrequency = 2.4f;
@@ -284,24 +342,24 @@ protected:
 
 	/** Peak world-space displacement away from the jumped wall; zero disables the kick. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump", meta = (ClampMin = "0", ClampMax = "3", Units = "cm"))
-	float WallJumpCameraImpulseIntensity = 1.5f;
+	float WallJumpCameraImpulseIntensity = 2.4f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump", meta = (ClampMin = "0", ClampMax = "5", Units = "deg"))
 	float WallJumpCameraFOVPulse = 3.0f;
 
-	/** Total pulse duration, including a short smooth attack and full recovery. */
+	/** Transition envelope duration; unified spring recovery can continue after it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump", meta = (ClampMin = "0.15", ClampMax = "1", Units = "s"))
 	float WallJumpCameraRecoveryDuration = 0.4f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing")
 	bool bEnableWallJumpLandingFeedback = true;
 
-	/** Maximum vertical dip, reached at LandingFullEffectSpeed; no rotational shake. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
-	float WallJumpLandingIntensity = 0.9f;
+	/** Maximum wall-jump landing compression, sharing the general landing pitch profile. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "0", ClampMax = "10", Units = "cm"))
+	float WallJumpLandingIntensity = 5.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "0.1", ClampMax = "0.6", Units = "s"))
-	float WallJumpLandingRecoveryDuration = 0.24f;
+	float WallJumpLandingRecoveryDuration = 0.34f;
 
 	/** Impact speed into the landing surface below which no landing feedback is played. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "0", Units = "cm/s"))
@@ -313,46 +371,54 @@ protected:
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> InputSubsystem;
 
 private:
-	/** A bounded one-shot envelope, sampled by world time rather than render-call count. */
+	enum class ECameraEvent : uint8 { None, Jump, Landing, WallJump, WallContact, Grapple };
+	/** A single replaceable transition, evaluated by world time, then fed through the shared springs. */
 	struct FCameraFeedbackPulse
 	{
 		FVector StartOffset = FVector::ZeroVector;
 		FVector PeakOffset = FVector::ZeroVector;
+		FVector StartRotation = FVector::ZeroVector;
+		FVector PeakRotation = FVector::ZeroVector;
 		float StartFOV = 0.0f;
 		float PeakFOV = 0.0f;
 		double StartTime = -1.0;
 		float Duration = 0.4f;
-		void Sample(double Now, FVector& Offset, float& FOV) const;
-		void Trigger(double Now, const FVector& Offset, float FOV, float RecoveryDuration);
+		void Sample(double Now, FVector& Offset, FVector& Rotation, float& FOV) const;
 	};
-	FCameraFeedbackPulse WallJumpCameraPulse;
-	FCameraFeedbackPulse WallJumpLandingPulse;
-	FCameraFeedbackPulse GrappleCameraPulse;
-	FCameraFeedbackPulse NormalJumpCameraPulse;
-	void SampleMovementCameraEffects(float DeltaTime, FVector& Offset, float& FOV);
-	float SmoothedSprintFOV = 0.0f;
+	void TriggerCameraEvent(ECameraEvent Source, const FVector& Offset, const FVector& Rotation, float FOV, float Duration);
+	void UpdateParkourCamera(float DeltaTime, double Now, const FRotator& ViewRotation);
+	void ResetCameraFeedback();
+	FVector ResolveCameraCollision(const FVector& Origin, const FVector& Desired) const;
+	FCameraFeedbackPulse CameraEvent;
+	ECameraEvent CameraEventSource = ECameraEvent::None;
+	FVector CameraPosition = FVector::ZeroVector;
+	FVector CameraPositionVelocity = FVector::ZeroVector;
+	FVector CameraRotation = FVector::ZeroVector;
+	FVector CameraRotationVelocity = FVector::ZeroVector;
+	float CameraFOV = 0.0f;
+	float CameraFOVVelocity = 0.0f;
+	float CameraStateFOV = 0.0f;
+	FVector FilteredCameraAcceleration = FVector::ZeroVector;
+	FVector PreviousCameraVelocity = FVector::ZeroVector;
+	FVector PreviousCameraLocation = FVector::ZeroVector;
+	float PreviousCameraYaw = 0.0f;
+	double LastCameraUpdateTime = -1.0;
+	bool bHasCameraHistory = false;
 	float SprintCameraMotionWeight = 0.0f;
 	float SprintCameraMotionPhase = 0.0f;
-	FVector SmoothedSprintMomentumOffset = FVector::ZeroVector;
-	float SmoothedAirborneCameraZ = 0.0f;
-	FVector SmoothedGrappleCameraOffset = FVector::ZeroVector;
-	float SmoothedGrappleFOV = 0.0f;
-	void SampleGrappleCameraEffects(float DeltaTime, FVector& Offset, float& FOV);
+	float SmoothedSprintFOV = 0.0f;
+	float WallCameraWeight = 0.0f;
+	float GrappleCameraWeight = 0.0f;
+	float SlideCameraWeight = 0.0f;
+	float AirCameraWeight = 0.0f;
+	bool bWasCameraWallRunning = false;
 	bool bWallJumpLandingPending = false;
+	bool bCameraLandingWasWallJump = false;
 	bool bJumpInputHeld = false;
 	bool bJumpBuffered = false;
 	bool bBufferedWallJumpOnly = false;
 	double JumpBufferExpiresAt = 0.0;
 	FString LastJumpRejection;
-	void ApplyWallRunCameraEffects(float DeltaTime, FMinimalViewInfo& OutResult);
-	float SmoothedWallRunRoll = 0.0f;
-	float SmoothedWallRunFOV = 0.0f;
-	float WallRunCameraMotionWeight = 0.0f;
-	float WallRunCameraMotionPhase = 0.0f;
-	float WallRunCameraEntryAge = 1.0f;
-	bool bWasCameraWallRunning = false;
-	FVector SmoothedWallRunOffset = FVector::ZeroVector;
-	FVector WallRunCameraCollisionOffset = FVector::ZeroVector;
 
 	FVector StandingCameraLocation = FVector(0.0f, 0.0f, 64.0f);
 	float SmoothedCameraZ = 64.0f;
