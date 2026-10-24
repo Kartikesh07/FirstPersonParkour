@@ -164,21 +164,80 @@ void AFPPlayerCharacter::SampleGrappleCameraEffects(float DeltaTime, FVector& Of
 	FOV += SmoothedGrappleFOV;
 }
 
+void AFPPlayerCharacter::OnJumped_Implementation()
+{
+	Super::OnJumped_Implementation();
+	// Native successful jumps only: buffered/blocked attempts and custom wall jumps
+	// do not invoke this event. This also covers successful slide jumps.
+	if (bEnableJumpCameraFeedback)
+	{
+		NormalJumpCameraPulse.Trigger(GetWorld()->GetTimeSeconds(),
+			-FVector::UpVector * FMath::Clamp(JumpCameraImpulse, 0.0f, 2.0f),
+			0.0f, FMath::Clamp(JumpCameraFeedbackDuration, 0.1f, 0.6f));
+	}
+}
+
+void AFPPlayerCharacter::SampleMovementCameraEffects(float DeltaTime, FVector& Offset, float& FOV)
+{
+	const float Dt = FMath::Max(0.0f, DeltaTime);
+	const bool bSpecialMovement = ParkourMovementComponent->IsWallRunning() || ParkourMovementComponent->IsGrappling();
+	const bool bGrounded = ParkourMovementComponent->IsMovingOnGround();
+	const bool bFalling = ParkourMovementComponent->IsFalling();
+	// Actual speed, rather than the sprint button, preserves deceleration and slide
+	// momentum. Special movement owns its own FOV; residual sprint FOV fades out.
+	const float SpeedWeight = !bSpecialMovement && (bGrounded || bFalling)
+		? FMath::Clamp((GetVelocity().Size2D() - ParkourMovementComponent->WalkSpeed)
+			/ FMath::Max(1.0f, ParkourMovementComponent->SprintSpeed - ParkourMovementComponent->WalkSpeed), 0.0f, 1.0f)
+		: 0.0f;
+	const float TargetFOV = bEnableSprintFOV ? SpeedWeight * FMath::Clamp(SprintCameraFOVBoost, 0.0f, 15.0f) : 0.0f;
+	const float FOVRate = TargetFOV > SmoothedSprintFOV ? SprintCameraBlendInSpeed : SprintCameraBlendOutSpeed;
+	SmoothedSprintFOV = FMath::Lerp(SmoothedSprintFOV, TargetFOV, 1.0f - FMath::Exp(-FMath::Max(0.1f, FOVRate) * Dt));
+
+	const float MotionTarget = bEnableSprintMotion && bGrounded && !bIsCrouched
+		&& !ParkourMovementComponent->IsSliding() ? SpeedWeight : 0.0f;
+	const float MotionAlpha = 1.0f - FMath::Exp(-FMath::Max(0.1f, SprintCameraMotionBlendSpeed) * Dt);
+	SprintCameraMotionWeight = FMath::Lerp(SprintCameraMotionWeight, MotionTarget, MotionAlpha);
+	const FVector MomentumTarget = -GetVelocity().GetSafeNormal2D() * MotionTarget
+		* FMath::Clamp(SprintCameraMomentumOffset, 0.0f, 1.0f);
+	SmoothedSprintMomentumOffset = FMath::Lerp(SmoothedSprintMomentumOffset, MomentumTarget, MotionAlpha);
+	// Continuous phase, a smoothly fading envelope, and sub-centimeter motion.
+	const float Frequency = FMath::Clamp(SprintCameraMotionFrequency, 0.5f, 4.0f)
+		* FMath::Lerp(0.6f, 1.0f, SprintCameraMotionWeight);
+	SprintCameraMotionPhase = FMath::Fmod(SprintCameraMotionPhase + 2.0f * PI * Frequency * Dt, 2.0f * PI);
+	const float FootstepZ = FMath::Sin(SprintCameraMotionPhase) * SprintCameraMotionWeight
+		* FMath::Clamp(SprintCameraMotionAmplitude, 0.0f, 0.5f);
+
+	const float AirTarget = bEnableAirborneCameraFeedback && bFalling && !bSpecialMovement
+		? -FMath::Clamp(GetVelocity().Z / FMath::Max(1.0f, AirborneCameraFullEffectSpeed), -1.0f, 1.0f)
+			* FMath::Clamp(AirborneCameraOffset, 0.0f, 1.0f) : 0.0f;
+	SmoothedAirborneCameraZ = FMath::Lerp(SmoothedAirborneCameraZ, AirTarget,
+		1.0f - FMath::Exp(-FMath::Max(0.1f, AirborneCameraBlendSpeed) * Dt));
+	float UnusedJumpFOV;
+	NormalJumpCameraPulse.Sample(GetWorld()->GetTimeSeconds(), Offset, UnusedJumpFOV);
+	Offset += SmoothedSprintMomentumOffset + FVector::UpVector * (FootstepZ + SmoothedAirborneCameraZ);
+	FOV = SmoothedSprintFOV;
+}
+
 void AFPPlayerCharacter::Landed(const FHitResult& Hit)
 {
 	// Landed is called before native falling velocity is converted to ground motion.
 	// Sample it here; feedback never writes to gameplay velocity or transforms.
-	if (bWallJumpLandingPending && bEnableWallJumpCameraEffects && bEnableWallJumpLandingFeedback)
+	// Choose exactly one profile. Disabling wall-jump landing feedback must not
+	// silently replace it with the general landing effect.
+	const bool bWallProfile = bWallJumpLandingPending;
+	const bool bFeedbackEnabled = bWallProfile
+		? bEnableWallJumpCameraEffects && bEnableWallJumpLandingFeedback : bEnableLandingCameraFeedback;
+	if (bFeedbackEnabled)
 	{
 		const float ImpactSpeed = FMath::Max(0.0f, -FVector::DotProduct(GetVelocity(), Hit.ImpactNormal));
-		const float MinSpeed = FMath::Max(0.0f, WallJumpLandingMinSpeed);
-		const float FullSpeed = FMath::Max(MinSpeed + 1.0f, WallJumpLandingFullEffectSpeed);
+		const float MinSpeed = FMath::Max(0.0f, bWallProfile ? WallJumpLandingMinSpeed : LandingCameraMinSpeed);
+		const float FullSpeed = FMath::Max(MinSpeed + 1.0f, bWallProfile ? WallJumpLandingFullEffectSpeed : LandingCameraFullEffectSpeed);
 		const float Strength = FMath::Clamp((ImpactSpeed - MinSpeed) / (FullSpeed - MinSpeed), 0.0f, 1.0f);
 		if (Strength > 0.0f)
 		{
 			WallJumpLandingPulse.Trigger(GetWorld()->GetTimeSeconds(),
-				-FVector::UpVector * FMath::Clamp(WallJumpLandingIntensity, 0.0f, 2.0f) * Strength,
-				0.0f, FMath::Clamp(WallJumpLandingRecoveryDuration, 0.1f, 0.6f));
+				-FVector::UpVector * FMath::Clamp(bWallProfile ? WallJumpLandingIntensity : LandingCameraIntensity, 0.0f, 2.0f) * Strength,
+				0.0f, FMath::Clamp(bWallProfile ? WallJumpLandingRecoveryDuration : LandingCameraRecoveryDuration, 0.1f, 0.6f));
 		}
 	}
 	bWallJumpLandingPending = false;
@@ -192,7 +251,8 @@ void AFPPlayerCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult
 	FVector CameraLocation = StandingCameraLocation;
 	const float CapsuleReduction = StandingCapsuleHalfHeight - GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
 	const float TargetZ = StandingCameraLocation.Z + CapsuleReduction - (bIsCrouched ? SlideCameraLowering : 0.0f);
-	const float Rate = bIsCrouched ? SlideCameraTransitionSpeed : SlideCameraRestoreSpeed;
+	const float RestoreRate = ParkourMovementComponent->IsFalling() ? SlideJumpCameraRestoreSpeed : SlideCameraRestoreSpeed;
+	const float Rate = bIsCrouched ? SlideCameraTransitionSpeed : RestoreRate;
 	const float Alpha = 1.0f - FMath::Exp(-FMath::Max(0.1f, Rate) * FMath::Max(0.0f, DeltaTime));
 	SmoothedCameraZ = FMath::Lerp(SmoothedCameraZ, TargetZ, Alpha);
 	CameraLocation.Z = SmoothedCameraZ;
@@ -268,9 +328,12 @@ void AFPPlayerCharacter::ApplyWallRunCameraEffects(float DeltaTime, FMinimalView
 	FVector GrappleOffset;
 	float GrappleFOV;
 	SampleGrappleCameraEffects(Dt, GrappleOffset, GrappleFOV);
+	FVector MovementOffset;
+	float MovementFOV;
+	SampleMovementCameraEffects(Dt, MovementOffset, MovementFOV);
 	// Share the existing camera collision solution with all cosmetic displacement.
 	const FVector VisualOffset = SmoothedWallRunOffset + FVector::UpVector * (ContactMotion - EntryDip)
-		+ JumpOffset + LandingOffset + GrappleOffset;
+		+ JumpOffset + LandingOffset + GrappleOffset + MovementOffset;
 
 	// Preserve the existing slide-camera solution. Sweep the additional visual
 	// displacement from that safe eye, constraining it immediately at obstructions.
@@ -303,8 +366,8 @@ void AFPPlayerCharacter::ApplyWallRunCameraEffects(float DeltaTime, FMinimalView
 	// Super::CalcCamera supplies a fresh base view each call. Apply offsets only
 	// to that view, never to control rotation, component rotation or stored FOV.
 	OutResult.Rotation.Roll = FRotator::NormalizeAxis(OutResult.Rotation.Roll + SmoothedWallRunRoll);
-	OutResult.FOV = FMath::Clamp(OutResult.FOV + SmoothedWallRunFOV + JumpFOV + GrappleFOV, 5.0f, 170.0f);
-	OutResult.FirstPersonFOV = FMath::Clamp(OutResult.FirstPersonFOV + SmoothedWallRunFOV + JumpFOV + GrappleFOV, 5.0f, 170.0f);
+	OutResult.FOV = FMath::Clamp(OutResult.FOV + SmoothedWallRunFOV + JumpFOV + GrappleFOV + MovementFOV, 5.0f, 170.0f);
+	OutResult.FirstPersonFOV = FMath::Clamp(OutResult.FirstPersonFOV + SmoothedWallRunFOV + JumpFOV + GrappleFOV + MovementFOV, 5.0f, 170.0f);
 }
 
 void AFPPlayerCharacter::RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation)
@@ -318,6 +381,12 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 {
 	WallJumpCameraPulse = FCameraFeedbackPulse();
 	WallJumpLandingPulse = FCameraFeedbackPulse();
+	NormalJumpCameraPulse = FCameraFeedbackPulse();
+	SmoothedSprintFOV = 0.0f;
+	SprintCameraMotionWeight = 0.0f;
+	SprintCameraMotionPhase = 0.0f;
+	SmoothedSprintMomentumOffset = FVector::ZeroVector;
+	SmoothedAirborneCameraZ = 0.0f;
 	bWallJumpLandingPending = false;
 	// Possession changes must not leave sprint latched on the previous pawn.
 	StopSprint();
