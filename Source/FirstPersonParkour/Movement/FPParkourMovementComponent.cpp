@@ -411,7 +411,7 @@ void UFPParkourMovementComponent::SetPostLandedPhysics(const FHitResult& Hit)
 void UFPParkourMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	if (bGrappling && HasValidData() && bShowGrappleDebug)
+	if (bGrappling && HasValidData() && (bShowGrappleDebug || CVarParkourGrappleDebug.GetValueOnGameThread() != 0))
 	{
 		DrawDebugLine(GetWorld(), UpdatedComponent->GetComponentLocation(), GrappleAnchor,
 			FColor::Cyan, false, 0.0f, 0, 1.5f);
@@ -887,11 +887,19 @@ bool UFPParkourMovementComponent::TryStartGrapple(const FVector& ViewLocation, c
 	UpdateGrappleReelTarget();
 	bGrappling = IsFalling();
 	bGrappleWallRunHandoffPending = false;
+	if (bGrappling)
+	{
+		if (AFPPlayerCharacter* Player = Cast<AFPPlayerCharacter>(CharacterOwner))
+		{
+			Player->NotifyGrappleVisuals(true, Velocity);
+		}
+	}
 	return bGrappling;
 }
 
 void UFPParkourMovementComponent::StopGrapple(const TCHAR* Reason)
 {
+	const bool bWasGrappling = bGrappling;
 	if (bGrappling)
 	{
 		LastGrappleReleaseStatus = GetGrappleDebugStatus(TEXT("detached"), Reason);
@@ -914,6 +922,13 @@ void UFPParkourMovementComponent::StopGrapple(const TCHAR* Reason)
 	ActiveRopeLength = 0.0f;
 	DesiredRopeLength = 0.0f;
 	GrappleSurface.Reset();
+	if (bWasGrappling)
+	{
+		if (AFPPlayerCharacter* Player = Cast<AFPPlayerCharacter>(CharacterOwner))
+		{
+			Player->NotifyGrappleVisuals(false, Velocity);
+		}
+	}
 }
 
 bool UFPParkourMovementComponent::IsGrappleStateDebugEnabled() const

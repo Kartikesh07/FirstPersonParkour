@@ -38,6 +38,9 @@ public:
 	bool TryStartGrapple(const FVector& ViewLocation, const FVector& ViewDirection);
 	void StopGrapple(const TCHAR* Reason = TEXT("input released/canceled"));
 	bool IsGrappling() const { return bGrappling; }
+	/** Read-only cosmetic state. Cable simulation must never feed back into movement. */
+	FVector GetGrappleAnchor() const { return GrappleAnchor; }
+	float GetActiveGrappleRopeLength() const { return ActiveRopeLength; }
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm"))
 	float GrappleRange = 3000.0f;
@@ -84,8 +87,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "1", Units = "cm/s"))
 	float MaxSwingSpeed = 2400.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple")
-	bool bShowGrappleDebug = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
+	bool bShowGrappleDebug = false;
 
 	/** Rope/target distance, state and release reason. Also enabled with parkour.DebugGrapple 1. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")

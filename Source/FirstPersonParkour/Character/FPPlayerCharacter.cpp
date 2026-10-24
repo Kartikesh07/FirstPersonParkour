@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Character/FPPlayerCharacter.h"
+#include "Character/FPGrappleCableComponent.h"
 #include "Movement/FPParkourMovementComponent.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -45,6 +46,10 @@ AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializ
 	FirstPersonCameraComponent->SetupAttachment(GetCapsuleComponent());
 	FirstPersonCameraComponent->SetRelativeLocation(FVector(0.0f, 0.0f, 64.0f));
 	FirstPersonCameraComponent->bUsePawnControlRotation = true;
+
+	GrappleCableComponent = ObjectInitializer.CreateDefaultSubobject<UFPGrappleCableComponent>(this, TEXT("GrappleCable"));
+	GrappleCableComponent->SetupAttachment(GetCapsuleComponent());
+	GrappleCableComponent->AddTickPrerequisiteComponent(ParkourMovementComponent);
 }
 
 void AFPPlayerCharacter::BeginPlay()
@@ -106,6 +111,57 @@ void AFPPlayerCharacter::NotifyWallJumpCamera(const FVector& JumpedWallNormal)
 		AwayFromWall * FMath::Clamp(WallJumpCameraImpulseIntensity, 0.0f, 3.0f),
 		FMath::Clamp(WallJumpCameraFOVPulse, 0.0f, 5.0f),
 		FMath::Clamp(WallJumpCameraRecoveryDuration, 0.15f, 1.0f));
+}
+
+void AFPPlayerCharacter::NotifyGrappleVisuals(bool bAttached, const FVector& Momentum)
+{
+	if (!bAttached)
+	{
+		GrappleCableComponent->HideGrappleCable();
+	}
+	if (!bEnableGrappleCameraEffects || !IsLocallyControlled() || Momentum.ContainsNaN())
+	{
+		return;
+	}
+	const FVector Direction = bAttached
+		? (ParkourMovementComponent->GetGrappleAnchor() - GetActorLocation()).GetSafeNormal()
+		: Momentum.GetSafeNormal();
+	const float Strength = bAttached ? 1.0f
+		: FMath::Clamp(Momentum.Size() / FMath::Max(1.0f, GrappleCameraFullEffectSpeed), 0.0f, 1.0f);
+	// Attach/release reuse one bounded envelope so rapid shots do not stack kicks.
+	GrappleCameraPulse.Trigger(GetWorld()->GetTimeSeconds(),
+		Direction * Strength * FMath::Clamp(bAttached ? GrappleAttachCameraImpulse : GrappleReleaseCameraImpulse, 0.0f, 2.0f),
+		Strength * FMath::Clamp(bAttached ? GrappleAttachFOVPulse : GrappleReleaseFOVPulse, 0.0f, 5.0f),
+		FMath::Clamp(bAttached ? GrappleAttachFeedbackDuration : GrappleReleaseFeedbackDuration, 0.05f, 1.0f));
+}
+
+void AFPPlayerCharacter::SampleGrappleCameraEffects(float DeltaTime, FVector& Offset, float& FOV)
+{
+	FVector TargetOffset = FVector::ZeroVector;
+	float TargetFOV = 0.0f;
+	if (bEnableGrappleCameraEffects && ParkourMovementComponent->IsGrappling())
+	{
+		const FVector ToAnchor = ParkourMovementComponent->GetGrappleAnchor() - GetActorLocation();
+		const FVector RopeDirection = ToAnchor.GetSafeNormal();
+		const float Slack = FMath::Max(0.0f, ParkourMovementComponent->GetActiveGrappleRopeLength() - ToAnchor.Size());
+		const float TangentialSpeed = FVector::VectorPlaneProject(GetVelocity(), RopeDirection).Size();
+		// Geometric tautness is only a visual weight, never a force or rope constraint.
+		const float TensionWeight = (1.0f - FMath::Clamp(Slack / 8.0f, 0.0f, 1.0f))
+			* FMath::Clamp(TangentialSpeed / FMath::Max(1.0f, GrappleCameraFullEffectSpeed), 0.0f, 1.0f);
+		TargetOffset = RopeDirection * TensionWeight * FMath::Clamp(GrappleTensionCameraOffset, 0.0f, 1.0f);
+		TargetFOV = TensionWeight * FMath::Clamp(GrappleTensionFOVBoost, 0.0f, 3.0f);
+	}
+	const float Alpha = 1.0f - FMath::Exp(-FMath::Max(0.1f, GrappleCameraBlendSpeed) * FMath::Max(0.0f, DeltaTime));
+	SmoothedGrappleCameraOffset = FMath::Lerp(SmoothedGrappleCameraOffset, TargetOffset, Alpha);
+	SmoothedGrappleFOV = FMath::Lerp(SmoothedGrappleFOV, TargetFOV, Alpha);
+	Offset = FVector::ZeroVector;
+	FOV = 0.0f;
+	if (bEnableGrappleCameraEffects)
+	{
+		GrappleCameraPulse.Sample(GetWorld()->GetTimeSeconds(), Offset, FOV);
+	}
+	Offset += SmoothedGrappleCameraOffset;
+	FOV += SmoothedGrappleFOV;
 }
 
 void AFPPlayerCharacter::Landed(const FHitResult& Hit)
@@ -209,9 +265,12 @@ void AFPPlayerCharacter::ApplyWallRunCameraEffects(float DeltaTime, FMinimalView
 	const double Now = GetWorld()->GetTimeSeconds();
 	WallJumpCameraPulse.Sample(Now, JumpOffset, JumpFOV);
 	WallJumpLandingPulse.Sample(Now, LandingOffset, LandingFOV);
+	FVector GrappleOffset;
+	float GrappleFOV;
+	SampleGrappleCameraEffects(Dt, GrappleOffset, GrappleFOV);
 	// Share the existing camera collision solution with all cosmetic displacement.
 	const FVector VisualOffset = SmoothedWallRunOffset + FVector::UpVector * (ContactMotion - EntryDip)
-		+ JumpOffset + LandingOffset;
+		+ JumpOffset + LandingOffset + GrappleOffset;
 
 	// Preserve the existing slide-camera solution. Sweep the additional visual
 	// displacement from that safe eye, constraining it immediately at obstructions.
@@ -244,8 +303,8 @@ void AFPPlayerCharacter::ApplyWallRunCameraEffects(float DeltaTime, FMinimalView
 	// Super::CalcCamera supplies a fresh base view each call. Apply offsets only
 	// to that view, never to control rotation, component rotation or stored FOV.
 	OutResult.Rotation.Roll = FRotator::NormalizeAxis(OutResult.Rotation.Roll + SmoothedWallRunRoll);
-	OutResult.FOV = FMath::Clamp(OutResult.FOV + SmoothedWallRunFOV + JumpFOV, 5.0f, 170.0f);
-	OutResult.FirstPersonFOV = FMath::Clamp(OutResult.FirstPersonFOV + SmoothedWallRunFOV + JumpFOV, 5.0f, 170.0f);
+	OutResult.FOV = FMath::Clamp(OutResult.FOV + SmoothedWallRunFOV + JumpFOV + GrappleFOV, 5.0f, 170.0f);
+	OutResult.FirstPersonFOV = FMath::Clamp(OutResult.FirstPersonFOV + SmoothedWallRunFOV + JumpFOV + GrappleFOV, 5.0f, 170.0f);
 }
 
 void AFPPlayerCharacter::RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation)
@@ -263,6 +322,10 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 	// Possession changes must not leave sprint latched on the previous pawn.
 	StopSprint();
 	ParkourMovementComponent->StopGrapple(TEXT("controller changed"));
+	GrappleCameraPulse = FCameraFeedbackPulse();
+	SmoothedGrappleCameraOffset = FVector::ZeroVector;
+	SmoothedGrappleFOV = 0.0f;
+	GrappleCableComponent->HideGrappleCable();
 	ParkourMovementComponent->StopSlide();
 	EndJump();
 	ClearBufferedJump(TEXT("rejected: controller changed"));
@@ -286,6 +349,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 void AFPPlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ParkourMovementComponent->StopGrapple(TEXT("end play"));
+	GrappleCableComponent->HideGrappleCable();
 	StopSprint();
 	EndJump();
 	ClearBufferedJump(TEXT("rejected: end play"));

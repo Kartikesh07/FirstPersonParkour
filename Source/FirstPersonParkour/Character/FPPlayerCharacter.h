@@ -11,6 +11,7 @@ class UFPParkourMovementComponent;
 class UInputMappingContext;
 class UInputAction;
 class UEnhancedInputLocalPlayerSubsystem;
+class UFPGrappleCableComponent;
 struct FInputActionValue;
 
 /**
@@ -41,6 +42,8 @@ public:
 	void RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation);
 	/** Cosmetic notification from the successful movement-component wall-jump path only. */
 	void NotifyWallJumpCamera(const FVector& JumpedWallNormal);
+	/** Cosmetic notification for every successful attach and release, including automatic detachment. */
+	void NotifyGrappleVisuals(bool bAttached, const FVector& Momentum);
 
 protected:
 	virtual void BeginPlay() override;
@@ -80,6 +83,46 @@ protected:
 	/** Custom parkour movement component reference. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UFPParkourMovementComponent> ParkourMovementComponent;
+
+	/** Stable rope width, material slots and tiling are editable on this component. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Parkour|Grapple Visuals")
+	TObjectPtr<UFPGrappleCableComponent> GrappleCableComponent;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple")
+	bool bEnableGrappleCameraEffects = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
+	float GrappleAttachCameraImpulse = 0.65f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "5", Units = "deg"))
+	float GrappleAttachFOVPulse = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0.05", ClampMax = "1", Units = "s"))
+	float GrappleAttachFeedbackDuration = 0.22f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
+	float GrappleReleaseCameraImpulse = 0.45f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "5", Units = "deg"))
+	float GrappleReleaseFOVPulse = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0.05", ClampMax = "1", Units = "s"))
+	float GrappleReleaseFeedbackDuration = 0.2f;
+
+	/** Smooth tension lean only; no oscillation or random shake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "1", Units = "cm"))
+	float GrappleTensionCameraOffset = 0.35f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0", ClampMax = "3", Units = "deg"))
+	float GrappleTensionFOVBoost = 0.75f;
+
+	/** Visual response rate per second, for both tension build and recovery. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "0.1"))
+	float GrappleCameraBlendSpeed = 8.0f;
+
+	/** Speed reaching full release/tension feedback; independent of movement tuning. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Grapple", meta = (ClampMin = "1", Units = "cm/s"))
+	float GrappleCameraFullEffectSpeed = 1800.0f;
 
 	/** Mapping context applied to the local player controller upon possession. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
@@ -211,6 +254,10 @@ private:
 	};
 	FCameraFeedbackPulse WallJumpCameraPulse;
 	FCameraFeedbackPulse WallJumpLandingPulse;
+	FCameraFeedbackPulse GrappleCameraPulse;
+	FVector SmoothedGrappleCameraOffset = FVector::ZeroVector;
+	float SmoothedGrappleFOV = 0.0f;
+	void SampleGrappleCameraEffects(float DeltaTime, FVector& Offset, float& FOV);
 	bool bWallJumpLandingPending = false;
 	bool bJumpInputHeld = false;
 	bool bJumpBuffered = false;
