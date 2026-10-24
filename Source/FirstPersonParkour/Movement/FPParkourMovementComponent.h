@@ -36,7 +36,7 @@ public:
 	bool TryWallJump();
 	/** Camera trace and capsule-clearance validation; never changes position or entry velocity. */
 	bool TryStartGrapple(const FVector& ViewLocation, const FVector& ViewDirection);
-	void StopGrapple();
+	void StopGrapple(const TCHAR* Reason = TEXT("input released/canceled"));
 	bool IsGrappling() const { return bGrappling; }
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm"))
@@ -49,13 +49,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm/s"))
 	float GrappleMaxPullSpeed = 1800.0f;
 
-	/** Minimum attachment distance and pull easing band; never detaches an active swing. */
+	/** Minimum attachment distance; never detaches an active swing. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple", meta = (ClampMin = "1", Units = "cm"))
 	float GrappleArrivalDistance = 150.0f;
 
-	/** Desired maximum radius, sampled on attachment. Longer shots reel down only as the player moves inward. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "100", Units = "cm"))
-	float GrappleRopeLength = 1200.0f;
+	/** Reel target, capped at attachment length. Ground clearance may request a shorter target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (DisplayName = "Target Rope Length", ClampMin = "100", Units = "cm"))
+	float GrappleRopeLength = 600.0f;
+
+	/** Explicit slack added to actual attachment distance; zero starts taut. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "0", Units = "cm"))
+	float GrappleInitialSlack = 0.0f;
+
+	/** Maximum rope take-up and pull-driven inward speed. Does not truncate inherited inward momentum. Zero disables reeling. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "0", Units = "cm/s"))
+	float GrappleReelSpeed = 600.0f;
+
+	/** Requested capsule-bottom clearance at the bottom of an overhead swing. Requires sufficient pull force and time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "0", Units = "cm"))
+	float GrappleMinSwingClearance = 100.0f;
 
 	/** Tangential input acceleration before SteeringInfluence; applied as a force, never an impulse. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple|Swing", meta = (ClampMin = "0", Units = "cm/s^2"))
@@ -74,6 +86,10 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Grapple")
 	bool bShowGrappleDebug = true;
+
+	/** Rope/target distance, state and release reason. Also enabled with parkour.DebugGrapple 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
+	bool bShowGrappleStateDebug = false;
 	bool IsWallRunning() const { return MovementMode == MOVE_Custom && CustomMovementMode == WallRunMode; }
 	/** World-space outward wall normal, for visual effects only. Zero outside wall-running. */
 	FVector GetWallRunNormal() const { return IsWallRunning() ? WallRunNormal : FVector::ZeroVector; }
@@ -238,6 +254,9 @@ protected:
 private:
 	bool IsGrapplePathClear(bool bCheckCapsulePath = false) const;
 	bool IsGrappleAnchorValid() const;
+	void UpdateGrappleReelTarget();
+	bool IsGrappleStateDebugEnabled() const;
+	FString GetGrappleDebugStatus(const TCHAR* State, const TCHAR* Reason) const;
 	void PhysGrapple(float DeltaTime, int32 Iterations);
 	/** Drift freely while slack, then follow a great-circle arc at the rope limit. */
 	FVector ComputeGrappleDrift(const FVector& Location, FVector& DriftVelocity, float DeltaTime) const;
@@ -245,6 +264,8 @@ private:
 	bool bGrappling = false;
 	float ActiveRopeLength = 0.0f;
 	float DesiredRopeLength = 0.0f;
+	bool bGrappleClearanceLimited = false;
+	FString LastGrappleReleaseStatus = TEXT("Grapple: detached | release: none");
 	FVector GrappleAnchor = FVector::ZeroVector;
 	FVector GrappleNormal = FVector::ZeroVector;
 	TWeakObjectPtr<UPrimitiveComponent> GrappleSurface;

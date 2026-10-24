@@ -16,7 +16,11 @@ static TAutoConsoleVariable<int32> CVarParkourMovementDebug(
 static TAutoConsoleVariable<int32> CVarParkourWallRunDebug(
 	TEXT("parkour.DebugWallRun"), 0, TEXT("Wall probes, rejection and detach diagnostics: 0 = off, 1 = on."));
 
+static TAutoConsoleVariable<int32> CVarParkourGrappleDebug(
+	TEXT("parkour.DebugGrapple"), 0, TEXT("Grapple rope lengths, state and release reason: 0 = off, 1 = on."));
+
 DEFINE_LOG_CATEGORY_STATIC(LogParkourWallRun, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogParkourGrapple, Log, All);
 
 UFPParkourMovementComponent::UFPParkourMovementComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -334,7 +338,7 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 {
 	if (!IsFalling())
 	{
-		StopGrapple();
+		StopGrapple(IsMovingOnGround() ? TEXT("landed: ground movement mode") : TEXT("movement mode changed"));
 	}
 	const bool bWasWallRunning = PreviousMovementMode == MOVE_Custom && PreviousCustomMode == WallRunMode;
 	if (IsWallRunning())
@@ -381,6 +385,16 @@ void UFPParkourMovementComponent::TickComponent(float DeltaTime, ELevelTick Tick
 	{
 		DrawDebugLine(GetWorld(), UpdatedComponent->GetComponentLocation(), GrappleAnchor,
 			FColor::Cyan, false, 0.0f, 0, 1.5f);
+	}
+	if (IsGrappleStateDebugEnabled() && GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
+	{
+		const float Distance = HasValidData() ? FVector::Distance(UpdatedComponent->GetComponentLocation(), GrappleAnchor) : 0.0f;
+		const bool bTaut = Distance >= ActiveRopeLength - 0.1f;
+		const bool bReeling = GrappleReelSpeed > 0.0f && ActiveRopeLength > DesiredRopeLength + 0.1f;
+		const TCHAR* State = bTaut ? (bReeling ? TEXT("taut/reeling") : TEXT("taut/swinging"))
+			: (bReeling ? TEXT("slack/reeling") : TEXT("slack"));
+		GEngine->AddOnScreenDebugMessage((2ull << 32) | GetUniqueID(), 0.0f, FColor::Cyan,
+			bGrappling ? GetGrappleDebugStatus(State, TEXT("none")) : LastGrappleReleaseStatus);
 	}
 	if ((bShowMovementDebug || CVarParkourMovementDebug.GetValueOnGameThread() != 0)
 		&& GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
@@ -682,27 +696,92 @@ bool UFPParkourMovementComponent::TryStartGrapple(const FVector& ViewLocation, c
 	CharacterOwner->StopJumping();
 	StopSlide();
 	SetMovementMode(MOVE_Falling);
-	// Never snap an attachment to a shorter configured rope. Pulling reels it
-	// toward the desired radius only after the capsule has actually moved inward.
-	DesiredRopeLength = FMath::Max(100.0f, GrappleRopeLength);
-	ActiveRopeLength = FMath::Max(DesiredRopeLength, Distance);
+	// The target is never an initial length or a lower bound on rope take-up.
+	// Short shots must not silently acquire the old default's 1200 cm of slack.
+	ActiveRopeLength = Distance + FMath::Max(0.0f, GrappleInitialSlack);
+	DesiredRopeLength = FMath::Min(ActiveRopeLength, FMath::Max(100.0f, GrappleRopeLength));
+	bGrappleClearanceLimited = false;
+	UpdateGrappleReelTarget();
 	bGrappling = IsFalling();
 	return bGrappling;
 }
 
-void UFPParkourMovementComponent::StopGrapple()
+void UFPParkourMovementComponent::StopGrapple(const TCHAR* Reason)
 {
-	if (bGrappling && GetWorld())
+	if (bGrappling)
 	{
+		LastGrappleReleaseStatus = GetGrappleDebugStatus(TEXT("detached"), Reason);
+		if (IsGrappleStateDebugEnabled())
+		{
+			UE_LOG(LogParkourGrapple, Log, TEXT("%s: %s"), *GetNameSafe(CharacterOwner), *LastGrappleReleaseStatus);
+		}
 		FallingSpeedLimit = FMath::Max(FallingSpeedLimit, Velocity.Size2D());
 		// Do not let a nearby wall immediately capture the retained release velocity.
-		WallRunReattachTime = FMath::Max(WallRunReattachTime,
-			GetWorld()->GetTimeSeconds() + FMath::Max(0.01f, WallRunReattachCooldown));
+		if (GetWorld())
+		{
+			WallRunReattachTime = FMath::Max(WallRunReattachTime,
+				GetWorld()->GetTimeSeconds() + FMath::Max(0.01f, WallRunReattachCooldown));
+		}
 	}
 	bGrappling = false;
 	ActiveRopeLength = 0.0f;
 	DesiredRopeLength = 0.0f;
 	GrappleSurface.Reset();
+}
+
+bool UFPParkourMovementComponent::IsGrappleStateDebugEnabled() const
+{
+	return bShowGrappleStateDebug || CVarParkourGrappleDebug.GetValueOnGameThread() != 0;
+}
+
+FString UFPParkourMovementComponent::GetGrappleDebugStatus(const TCHAR* State, const TCHAR* Reason) const
+{
+	const float Distance = HasValidData() ? FVector::Distance(UpdatedComponent->GetComponentLocation(), GrappleAnchor) : 0.0f;
+	return FString::Printf(TEXT("Grapple: %s | rope %.1f cm | distance %.1f cm | target %.1f cm | clearance target %s | release: %s"),
+		State, ActiveRopeLength, Distance, DesiredRopeLength, bGrappleClearanceLimited ? TEXT("limited") : TEXT("normal"), Reason);
+}
+
+void UFPParkourMovementComponent::UpdateGrappleReelTarget()
+{
+	const FVector Center = UpdatedComponent->GetComponentLocation();
+	const FVector Down = GetGravityDirection();
+	if (GrappleMinSwingClearance <= 0.0f || FVector::DotProduct(GrappleAnchor - Center, -Down) <= 0.0)
+	{
+		return;
+	}
+	const UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent();
+	const float Radius = Capsule->GetScaledCapsuleRadius();
+	const float Support = Radius + (Capsule->GetScaledCapsuleHalfHeight() - Radius)
+		* FMath::Abs(FVector::DotProduct(Capsule->GetUpVector(), Down));
+	const float Reach = ActiveRopeLength + Support + GrappleMinSwingClearance;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GrappleGroundClearance), false, CharacterOwner);
+	FCollisionResponseParams Response;
+	InitCollisionParams(Params, Response);
+	// Probe both the swing's lowest point and the ground currently under the
+	// player. A floor plane predicts clearance before the swing descends into it.
+	for (const FVector Start : { GrappleAnchor + Down * 2.0f, Center })
+	{
+		FHitResult FloorHit;
+		if (!GetWorld()->LineTraceSingleByChannel(FloorHit, Start, Start + Down * Reach,
+			UpdatedComponent->GetCollisionObjectType(), Params, Response) || !FloorHit.IsValidBlockingHit() || !IsWalkable(FloorHit))
+		{
+			continue;
+		}
+		const double Denominator = FVector::DotProduct(Down, FloorHit.ImpactNormal);
+		if (Denominator >= -UE_SMALL_NUMBER)
+		{
+			continue;
+		}
+		const float AnchorHeight = FVector::DotProduct(FloorHit.ImpactPoint - GrappleAnchor, FloorHit.ImpactNormal) / Denominator;
+		const float ClearanceLength = FMath::Max(100.0f, AnchorHeight - Support - GrappleMinSwingClearance);
+		if (ClearanceLength < DesiredRopeLength)
+		{
+			DesiredRopeLength = ClearanceLength;
+			bGrappleClearanceLimited = true;
+		}
+	}
+	// This only requests a shorter target. Pull force, reel speed, actual capsule
+	// travel and collision determine whether it is achievable before reaching ground.
 }
 
 bool UFPParkourMovementComponent::IsGrappleAnchorValid() const
@@ -762,18 +841,27 @@ FVector UFPParkourMovementComponent::NewFallVelocity(const FVector& InitialVeloc
 	{
 		const FVector ToAnchor = GrappleAnchor - UpdatedComponent->GetComponentLocation();
 		const FVector Direction = ConstrainDirectionToPlane(ToAnchor).GetSafeNormal();
-		// Ease the existing pull to zero at the desired swing radius. Continuous
-		// inward acceleration at full strength would collapse every pendulum.
-		const float PullAlpha = FMath::Clamp(static_cast<float>((ToAnchor.Size() - DesiredRopeLength)
-			/ FMath::Max(1.0f, GrappleArrivalDistance)), 0.0f, 1.0f);
-		const float PullWeight = PullAlpha * PullAlpha * (3.0f - 2.0f * PullAlpha);
+		// A force-limited radial speed controller accounts for gravity and the
+		// centrifugal load. It cannot shorten the rope by editing position or
+		// invent a velocity impulse when clearance requires faster reeling.
+		const float Error = FMath::Max(0.0f, static_cast<float>(ToAnchor.Size()) - DesiredRopeLength);
+		const float PullAcceleration = FMath::Max(0.0f, GrapplePullAcceleration);
+		const float ReelSpeed = FMath::Min(FMath::Max(0.0f, GrappleReelSpeed), FMath::Max(1.0f, GrappleMaxPullSpeed));
+		const float RequestedSpeed = FMath::Min(ReelSpeed, FMath::Sqrt(2.0f * PullAcceleration * Error));
+		const float InwardSpeed = FVector::DotProduct(InitialVelocity, Direction);
+		const double TangentialSpeedSquared = FVector::VectorPlaneProject(InitialVelocity, Direction).SizeSquared();
+		const float RequiredAcceleration = (RequestedSpeed - InwardSpeed) / DeltaTime
+			- FVector::DotProduct(Gravity, Direction) + TangentialSpeedSquared / FMath::Max(1.0, ToAnchor.Size());
+		const float AppliedAcceleration = Error > 0.01f && ReelSpeed > 0.0f
+			? FMath::Clamp(RequiredAcceleration, 0.0f, PullAcceleration) : 0.0f;
 		const float Along = FVector::DotProduct(Result, Direction);
 		const float Limit = FMath::Max(FMath::Max(1.0f, GrappleMaxPullSpeed), Result.Size());
 		// Solve |v + direction * dv| <= limit. Cap only the added pull, preserving
 		// tangential and faster inherited momentum rather than clamping entry velocity.
 		const float Available = FMath::Max(0.0f, -Along + FMath::Sqrt(FMath::Max(0.0f,
 			Along * Along + Limit * Limit - Result.SizeSquared())));
-		Result += Direction * FMath::Min(FMath::Max(0.0f, GrapplePullAcceleration) * PullWeight * DeltaTime, Available);
+		const float SpeedBudget = FMath::Max(0.0f, ReelSpeed - Along);
+		Result += Direction * FMath::Min3(AppliedAcceleration * DeltaTime, Available, SpeedBudget);
 
 		const FVector Input = (Acceleration / FMath::Max(1.0f, GetMaxAcceleration())).GetClampedToMaxSize(1.0f);
 		const FVector Steering = FVector::VectorPlaneProject(Input, ToAnchor.GetSafeNormal());
@@ -854,12 +942,15 @@ void UFPParkourMovementComponent::PhysGrapple(float DeltaTime, int32 Iterations)
 			StartNewPhysics(RemainingTime, Iterations);
 			return;
 		}
-		if (!IsGrappleAnchorValid() || !IsGrapplePathClear() || Velocity.ContainsNaN())
+		const TCHAR* ReleaseReason = !IsGrappleAnchorValid() ? TEXT("anchor invalid/moved or movement ownership changed")
+			: !IsGrapplePathClear() ? TEXT("rope obstructed") : Velocity.ContainsNaN() ? TEXT("invalid velocity") : nullptr;
+		if (ReleaseReason)
 		{
-			StopGrapple();
+			StopGrapple(ReleaseReason);
 			Super::PhysFalling(RemainingTime, Iterations);
 			return;
 		}
+		UpdateGrappleReelTarget();
 		const float TimeTick = FMath::Min(RemainingTime, 1.0f / 120.0f);
 		RemainingTime -= TimeTick;
 		const FVector OldLocation = UpdatedComponent->GetComponentLocation();
@@ -877,6 +968,7 @@ void UFPParkourMovementComponent::PhysGrapple(float DeltaTime, int32 Iterations)
 		Velocity = HalfVelocity;
 		FHitResult Hit;
 		SafeMoveUpdatedComponent(Delta, UpdatedComponent->GetComponentQuat(), true, Hit);
+		FVector SweepDelta = Delta;
 		FVector ContactNormals[2];
 		int32 ContactCount = 0;
 		float UnusedTime = TimeTick * (1.0f - Hit.Time);
@@ -889,13 +981,25 @@ void UFPParkourMovementComponent::PhysGrapple(float DeltaTime, int32 Iterations)
 			}
 			if (Hit.bStartPenetrating)
 			{
-				StopGrapple();
+				StopGrapple(TEXT("unresolved capsule penetration"));
 				Super::PhysFalling(RemainingTime, Iterations);
 				return;
 			}
-			if (FVector::DotProduct(Velocity, GetGravityDirection()) >= 0.0
+			if (Impact == 0)
+			{
+				// Use the velocity at the collision time, not at the planned arc's
+				// endpoint. The latter can already be descending after a grazing hit.
+				Velocity = UnconstrainedHalfVelocity;
+				ComputeGrappleDrift(OldLocation, Velocity, TimeTick * Hit.Time);
+			}
+			if (FVector::DotProduct(Velocity, GetGravityDirection()) > 1.0
+				&& FVector::DotProduct(Velocity, Hit.ImpactNormal) < -1.0
+				&& FVector::DotProduct(SweepDelta, Hit.ImpactNormal) < -UE_SMALL_NUMBER
 				&& IsValidLandingSpot(UpdatedComponent->GetComponentLocation(), Hit))
 			{
+				// Genuine downward floor contact retains the native landing path,
+				// including camera feedback. A grazing/ascending contact only slides.
+				StopGrapple(TEXT("landed: descending onto a walkable floor"));
 				ProcessLanded(Hit, RemainingTime + UnusedTime, Iterations);
 				return;
 			}
@@ -905,12 +1009,6 @@ void UFPParkourMovementComponent::PhysGrapple(float DeltaTime, int32 Iterations)
 				StartNewPhysics(RemainingTime + UnusedTime, Iterations);
 				return;
 			}
-			if (Impact == 0)
-			{
-				// The planned arc was interrupted. Do not restore its transported
-				// speed after a collision or infer velocity from constraint correction.
-				Velocity = UnconstrainedHalfVelocity;
-			}
 			ContactNormals[ContactCount++] = Hit.Normal;
 			Velocity -= Hit.Normal * FMath::Min(0.0, FVector::DotProduct(Velocity, Hit.Normal));
 			if (Impact == 1 || UnusedTime < MIN_TICK_TIME)
@@ -919,6 +1017,7 @@ void UFPParkourMovementComponent::PhysGrapple(float DeltaTime, int32 Iterations)
 			}
 			const FVector SlideDelta = LimitGrappleDelta(UpdatedComponent->GetComponentLocation(),
 				ComputeSlideVector(Velocity * UnusedTime, 1.0f, Hit.Normal, Hit));
+			SweepDelta = SlideDelta;
 			SafeMoveUpdatedComponent(SlideDelta, UpdatedComponent->GetComponentQuat(), true, Hit);
 			UnusedTime *= 1.0f - Hit.Time;
 		}
@@ -937,11 +1036,16 @@ void UFPParkourMovementComponent::PhysGrapple(float DeltaTime, int32 Iterations)
 		{
 			// Collision/depenetration or another movement source owns the position.
 			// Release instead of dragging the capsule back through geometry.
-			StopGrapple();
+			StopGrapple(Distance < 1.0f ? TEXT("anchor reached") : TEXT("collision displaced capsule beyond rope limit"));
 			Super::PhysFalling(RemainingTime, Iterations);
 			return;
 		}
-		ActiveRopeLength = FMath::Max(DesiredRopeLength, FMath::Min(ActiveRopeLength, Distance));
+		// Take up only rope the swept capsule actually made available, no faster
+		// than the reel speed. Neither target changes nor inward momentum can extend
+		// the rope or shrink it through the player's current collision position.
+		const float TakeUp = FMath::Max(0.0f, GrappleReelSpeed) * TimeTick;
+		ActiveRopeLength = FMath::Min(ActiveRopeLength,
+			FMath::Max3(DesiredRopeLength, ActiveRopeLength - TakeUp, Distance));
 		Velocity = NewFallVelocity(Velocity, Gravity, TimeTick * 0.5f);
 		const FVector Normal = Offset.GetSafeNormal();
 		const bool bTaut = Distance >= ActiveRopeLength - 0.01f;
@@ -967,7 +1071,7 @@ void UFPParkourMovementComponent::PhysGrapple(float DeltaTime, int32 Iterations)
 	}
 	if (RemainingTime >= MIN_TICK_TIME && HasValidData())
 	{
-		StopGrapple();
+		StopGrapple(TEXT("physics hitch exceeded grapple step budget"));
 		Super::PhysFalling(RemainingTime, Iterations);
 	}
 }

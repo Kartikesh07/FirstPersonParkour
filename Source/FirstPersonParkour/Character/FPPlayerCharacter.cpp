@@ -257,7 +257,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 	bWallJumpLandingPending = false;
 	// Possession changes must not leave sprint latched on the previous pawn.
 	StopSprint();
-	EndGrapple();
+	ParkourMovementComponent->StopGrapple(TEXT("controller changed"));
 	ParkourMovementComponent->StopSlide();
 	EndJump();
 	RemoveDefaultMappingContext();
@@ -279,7 +279,7 @@ void AFPPlayerCharacter::NotifyControllerChanged()
 
 void AFPPlayerCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	EndGrapple();
+	ParkourMovementComponent->StopGrapple(TEXT("end play"));
 	StopSprint();
 	EndJump();
 	ParkourMovementComponent->StopSlide();
