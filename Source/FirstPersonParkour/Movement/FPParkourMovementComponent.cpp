@@ -132,6 +132,16 @@ void UFPParkourMovementComponent::CalcVelocity(float DeltaTime, float Friction, 
 			const float Duration = TargetSpeed > CurrentGroundSpeed ? SprintAccelerationTime : SprintDecelerationTime;
 			const float Rate = FMath::Max(1.0f, SprintSpeed - WalkSpeed) / FMath::Max(0.01f, Duration);
 			CurrentGroundSpeed = FMath::FInterpConstantTo(CurrentGroundSpeed, FMath::Max(0.0f, TargetSpeed), DeltaTime, Rate);
+
+			// Retain sprint braking while Shift is held, and blend back by actual
+			// momentum when released (including simultaneous Shift/WASD release).
+			// This blends physics settings only; native CalcVelocity owns velocity.
+			const float SprintRange = FMath::Max(1.0f, SprintSpeed - WalkSpeed);
+			const float MomentumAlpha = FMath::Clamp((Velocity.Size2D() - WalkSpeed) / SprintRange, 0.0f, 1.0f);
+			const float SprintAlpha = bSprintRequested ? 1.0f : MomentumAlpha;
+			Friction = FMath::Max(0.0f, FMath::Lerp(WalkingGroundFriction, SprintingGroundFriction, SprintAlpha));
+			BrakingDeceleration = FMath::Max(0.0f,
+				FMath::Lerp(WalkingBrakingDeceleration, SprintingBrakingDeceleration, SprintAlpha));
 		}
 		Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
 		return;
@@ -165,6 +175,17 @@ void UFPParkourMovementComponent::CalcVelocity(float DeltaTime, float Friction, 
 	Velocity.X = HorizontalVelocity.X;
 	Velocity.Y = HorizontalVelocity.Y;
 	// PhysWalking continues to handle swept movement, floors, steps, walls and ledges.
+}
+
+float UFPParkourMovementComponent::GetMaxAcceleration() const
+{
+	if (IsMovingOnGround() && !IsCrouching() && !bSliding)
+	{
+		// Queried by native input scaling before CalcVelocity, not just by physics.
+		return FMath::Max(0.0f, bSprintRequested ? SprintingAcceleration : WalkingAcceleration);
+	}
+	// Preserve existing air control, slide steering input and other movement modes.
+	return Super::GetMaxAcceleration();
 }
 
 float UFPParkourMovementComponent::GetMaxSpeed() const

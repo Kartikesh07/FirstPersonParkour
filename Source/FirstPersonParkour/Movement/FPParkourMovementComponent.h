@@ -20,6 +20,7 @@ public:
 	UFPParkourMovementComponent(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	virtual float GetMaxSpeed() const override;
+	virtual float GetMaxAcceleration() const override;
 	virtual void BeginPlay() override;
 	virtual void Crouch(bool bClientSimulation = false) override;
 	virtual void UnCrouch(bool bClientSimulation = false) override;
@@ -66,6 +67,28 @@ public:
 	/** Time for the ground speed cap to return from sprint to walk while moving. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement", meta = (ClampMin = "0.01", Units = "s"))
 	float SprintDecelerationTime = 0.4f;
+
+	/** Native input acceleration while walking; reaches WalkSpeed in about 0.23 seconds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement|Walking", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float WalkingAcceleration = 1800.0f;
+
+	/** Native input acceleration while sprint is requested; the existing speed-cap ramp still applies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement|Sprinting", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float SprintingAcceleration = 2200.0f;
+
+	/** Constant native braking deceleration, in addition to friction drag. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement|Walking", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float WalkingBrakingDeceleration = 1000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement|Sprinting", meta = (ClampMin = "0", Units = "cm/s^2"))
+	float SprintingBrakingDeceleration = 900.0f;
+
+	/** Native ground friction controls both directional response and braking drag. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement|Walking", meta = (ClampMin = "0"))
+	float WalkingGroundFriction = 5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement|Sprinting", meta = (ClampMin = "0"))
+	float SprintingGroundFriction = 4.0f;
 
 	/** Optional local display of horizontal speed, world velocity and movement state. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
