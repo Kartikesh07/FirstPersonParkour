@@ -105,7 +105,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
 	float WallRunGravityScale = 0.3f;
 
-	/** Cumulative wall-running time per airborne period; only landing restores the budget. */
+	/** Time allowed per run. A wall jump to a different valid surface starts a new run;
+	 *  same-wall reattachments and detachments without a wall jump retain elapsed time. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.01", Units = "s"))
 	float WallRunMaxDuration = 1.5f;
 
@@ -113,7 +114,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "0.25", Units = "s"))
 	float WallRunContactGraceTime = 0.1f;
 
-	/** Prevent immediate falling/custom-mode loops without consuming an unused airborne budget. */
+	/** Prevent immediate falling/custom-mode loops; detachment does not refresh run duration. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.01", Units = "s"))
 	float WallRunReattachCooldown = 0.2f;
 
@@ -211,12 +212,18 @@ private:
 		double UnlockTime = 0.0;
 		bool bHasSeparated = false;
 	};
+	bool MatchesWallSurface(const FHitResult& Hit, const FWallJumpRestriction& Surface) const;
 	bool IsWallJumpSurfaceBlocked(const FHitResult& Hit) const;
 	void UpdateWallJumpRestrictions();
 	// Keep all recent surfaces when chaining, so jumping from B cannot erase A's lock.
 	TArray<FWallJumpRestriction> WallJumpRestrictions;
+	// Independent of expiring collision locks: unlocking the same wall cannot grant a new run.
+	FWallJumpRestriction WallJumpRunSource;
+	bool bWallJumpRunPending = false;
+	uint32 WallRunNumber = 0;
 	FVector WallRunNormal = FVector::ZeroVector;
 	FVector WallRunDirection = FVector::ZeroVector;
+	/** Simulation time in the current run, retained through ordinary reattachments. */
 	float WallRunElapsed = 0.0f;
 	float WallRunContactLostTime = 0.0f;
 	double WallRunReattachTime = 0.0;

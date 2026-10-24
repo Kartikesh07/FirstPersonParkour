@@ -144,13 +144,15 @@ bool UFPParkourMovementComponent::TryWallJump()
 	Restriction.Normal = Normal;
 	Restriction.Point = WallHit.ImpactPoint;
 	Restriction.UnlockTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.01f, WallJumpSameWallCooldown);
+	WallJumpRunSource = Restriction;
+	bWallJumpRunPending = true;
 	CharacterOwner->StopJumping();
 	Velocity = JumpVelocity;
 	SetMovementMode(MOVE_Falling);
 	// A different wall can attach immediately if eligible. The jumped surface has its
-	// own stronger restriction, and the existing airborne duration is never reset here.
+	// own stronger restriction. Duration refresh waits for a valid different-wall attachment.
 	WallRunReattachTime = GetWorld()->GetTimeSeconds();
-	DebugWallRun(TEXT("wall jump: native falling; same surface locked"));
+	DebugWallRun(TEXT("wall jump: same surface locked; different-wall run reset armed"));
 	if (AFPPlayerCharacter* Player = Cast<AFPPlayerCharacter>(CharacterOwner))
 	{
 		Player->NotifyWallJumpCamera(Normal);
@@ -158,16 +160,21 @@ bool UFPParkourMovementComponent::TryWallJump()
 	return true;
 }
 
-bool UFPParkourMovementComponent::IsWallJumpSurfaceBlocked(const FHitResult& Hit) const
+bool UFPParkourMovementComponent::MatchesWallSurface(const FHitResult& Hit, const FWallJumpRestriction& Surface) const
 {
 	const FVector Normal = Hit.ImpactNormal.GetSafeNormal2D();
 	const float SameSurfaceCos = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(WallJumpSameSurfaceAngle, 0.0f, 60.0f)));
+	return FVector::DotProduct(Normal, Surface.Normal) >= SameSurfaceCos
+		&& ((Surface.Surface.IsValid() && Surface.Surface.Get() == Hit.GetComponent())
+			|| FMath::Abs(FVector::DotProduct(Hit.ImpactPoint - Surface.Point, Surface.Normal))
+				<= FMath::Max(0.0f, WallJumpSurfacePlaneTolerance));
+}
+
+bool UFPParkourMovementComponent::IsWallJumpSurfaceBlocked(const FHitResult& Hit) const
+{
 	for (const FWallJumpRestriction& Restriction : WallJumpRestrictions)
 	{
-		if (FVector::DotProduct(Normal, Restriction.Normal) >= SameSurfaceCos
-			&& ((Restriction.Surface.IsValid() && Restriction.Surface.Get() == Hit.GetComponent())
-				|| FMath::Abs(FVector::DotProduct(Hit.ImpactPoint - Restriction.Point, Restriction.Normal))
-					<= FMath::Max(0.0f, WallJumpSurfacePlaneTolerance)))
+		if (MatchesWallSurface(Hit, Restriction))
 		{
 			return true;
 		}
@@ -337,6 +344,9 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 	if (IsMovingOnGround())
 	{
 		WallRunElapsed = 0.0f;
+		WallRunNumber = 0;
+		bWallJumpRunPending = false;
+		WallJumpRunSource = FWallJumpRestriction();
 		WallRunReattachTime = 0.0;
 		WallJumpRestrictions.Reset();
 	}
@@ -436,9 +446,9 @@ void UFPParkourMovementComponent::DebugWallRun(const TCHAR* Message)
 	}
 	LastWallRunDebugMessage = Message;
 	NextWallRunDebugTime = Now + 0.5;
-	const FString Status = FString::Printf(TEXT("WallRun: %s | Mode %d/%d | XY %.0f/%.0f Z %.0f | budget %.2f/%.2f"),
+	const FString Status = FString::Printf(TEXT("WallRun: %s | Mode %d/%d | XY %.0f/%.0f Z %.0f | run #%u %.2f/%.2f s | chain reset armed %d"),
 		Message, static_cast<int32>(MovementMode), CustomMovementMode, Velocity.Size2D(), WallRunMinSpeed,
-		Velocity.Z, WallRunElapsed, WallRunMaxDuration);
+		Velocity.Z, WallRunNumber, WallRunElapsed, WallRunMaxDuration, bWallJumpRunPending ? 1 : 0);
 	UE_LOG(LogParkourWallRun, Log, TEXT("%s: %s"), *GetNameSafe(CharacterOwner), *Status);
 	if (GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
 	{
@@ -508,10 +518,6 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 		DebugWallRun(Reason);
 		return false;
 	};
-	if (WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration) - MIN_TICK_TIME)
-	{
-		return Reject(TEXT("reject: airborne time budget exhausted; land to reset"));
-	}
 	if (GetWorld()->GetTimeSeconds() < WallRunReattachTime)
 	{
 		return Reject(TEXT("reject: reattachment cooldown"));
@@ -554,6 +560,17 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 				Rejection = TEXT("reject: jumped surface needs cooldown and capsule separation");
 				continue;
 			}
+			// Check duration per candidate, after collision restrictions. An exhausted
+			// old run must not hide an eligible different-wall jump destination.
+			const bool bStartsNewRun = WallRunNumber == 0
+				|| (bWallJumpRunPending && !MatchesWallSurface(Hit, WallJumpRunSource));
+			if (!bStartsNewRun && WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration) - MIN_TICK_TIME)
+			{
+				Rejection = bWallJumpRunPending
+					? TEXT("reject: same-wall duration exhausted; jump did not authorize a same-wall reset")
+					: TEXT("reject: current run duration exhausted; no different-wall jump reset");
+				continue;
+			}
 			const FVector Tangent = FVector::CrossProduct(FVector::UpVector, Hit.ImpactNormal).GetSafeNormal();
 			if (FMath::Abs(FVector::DotProduct(Travel, Tangent)) >= FMath::Clamp(WallRunMinAlignment, 0.0f, 1.0f)
 				&& Hit.Distance < BestDistance)
@@ -577,10 +594,27 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 	}
 	WallRunNormal = BestHit.ImpactNormal.GetSafeNormal2D();
 	WallRunDirection = Travel;
+	const bool bInitialRun = WallRunNumber == 0;
+	const bool bStartsNewRun = bInitialRun
+		|| (bWallJumpRunPending && !MatchesWallSurface(BestHit, WallJumpRunSource));
 	// No velocity boost, vertical reset or position snap on entry.
 	SetMovementMode(MOVE_Custom, WallRunMode);
-	DebugWallRun(IsWallRunning() ? TEXT("entered custom wall-run mode") : TEXT("reject: movement mode transition failed"));
-	return IsWallRunning();
+	if (!IsWallRunning())
+	{
+		return Reject(TEXT("reject: movement mode transition failed"));
+	}
+	if (bStartsNewRun)
+	{
+		WallRunElapsed = 0.0f;
+		++WallRunNumber;
+	}
+	// Consume the authorization on the first successful attachment, even if it
+	// resumes the same wall. Seam misses and mode changes cannot keep it alive.
+	bWallJumpRunPending = false;
+	DebugWallRun(bInitialRun ? TEXT("duration reset: first run since landing")
+		: bStartsNewRun ? TEXT("duration reset: successful wall jump to a different surface")
+		: TEXT("reattached: duration retained; no legitimate different-wall jump reset"));
+	return true;
 }
 
 void UFPParkourMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
@@ -622,7 +656,7 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		const TCHAR* DetachReason = nullptr;
 		if (DurationLeft < MIN_TICK_TIME)
 		{
-			DetachReason = TEXT("detach: airborne time budget exhausted");
+			DetachReason = TEXT("detach: current run duration exhausted");
 		}
 		else if (!CharacterOwner->Controller || IsCrouching() || bWantsToCrouch)
 		{
@@ -778,6 +812,6 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 	}
 	if (IsWallRunning() && WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration))
 	{
-		EndWallRun(RemainingTime, Iterations, TEXT("detach: airborne time budget exhausted"));
+		EndWallRun(RemainingTime, Iterations, TEXT("detach: current run duration exhausted"));
 	}
 }
