@@ -29,9 +29,12 @@ public:
 
 	/** Called around native capsule resizing to compensate its actual displacement, including clearance adjustments. */
 	void RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation);
+	/** Cosmetic notification from the successful movement-component wall-jump path only. */
+	void NotifyWallJumpCamera(const FVector& JumpedWallNormal);
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void Landed(const FHitResult& Hit) override;
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void NotifyControllerChanged() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -142,9 +145,55 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Run", meta = (ClampMin = "0.5", ClampMax = "4", Units = "Hz"))
 	float WallRunCameraMotionFrequency = 2.4f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump")
+	bool bEnableWallJumpCameraEffects = true;
+
+	/** Peak world-space displacement away from the jumped wall; zero disables the kick. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump", meta = (ClampMin = "0", ClampMax = "3", Units = "cm"))
+	float WallJumpCameraImpulseIntensity = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump", meta = (ClampMin = "0", ClampMax = "5", Units = "deg"))
+	float WallJumpCameraFOVPulse = 3.0f;
+
+	/** Total pulse duration, including a short smooth attack and full recovery. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump", meta = (ClampMin = "0.15", ClampMax = "1", Units = "s"))
+	float WallJumpCameraRecoveryDuration = 0.4f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing")
+	bool bEnableWallJumpLandingFeedback = true;
+
+	/** Maximum vertical dip, reached at LandingFullEffectSpeed; no rotational shake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "0", ClampMax = "2", Units = "cm"))
+	float WallJumpLandingIntensity = 0.9f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "0.1", ClampMax = "0.6", Units = "s"))
+	float WallJumpLandingRecoveryDuration = 0.24f;
+
+	/** Impact speed into the landing surface below which no landing feedback is played. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "0", Units = "cm/s"))
+	float WallJumpLandingMinSpeed = 150.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Wall Jump|Landing", meta = (ClampMin = "1", Units = "cm/s"))
+	float WallJumpLandingFullEffectSpeed = 900.0f;
+
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> InputSubsystem;
 
 private:
+	/** A bounded one-shot envelope, sampled by world time rather than render-call count. */
+	struct FCameraFeedbackPulse
+	{
+		FVector StartOffset = FVector::ZeroVector;
+		FVector PeakOffset = FVector::ZeroVector;
+		float StartFOV = 0.0f;
+		float PeakFOV = 0.0f;
+		double StartTime = -1.0;
+		float Duration = 0.4f;
+		void Sample(double Now, FVector& Offset, float& FOV) const;
+		void Trigger(double Now, const FVector& Offset, float FOV, float RecoveryDuration);
+	};
+	FCameraFeedbackPulse WallJumpCameraPulse;
+	FCameraFeedbackPulse WallJumpLandingPulse;
+	bool bWallJumpLandingPending = false;
 	bool bJumpInputHeld = false;
 	void ApplyWallRunCameraEffects(float DeltaTime, FMinimalViewInfo& OutResult);
 	float SmoothedWallRunRoll = 0.0f;

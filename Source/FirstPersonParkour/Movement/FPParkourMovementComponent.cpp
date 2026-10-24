@@ -151,6 +151,10 @@ bool UFPParkourMovementComponent::TryWallJump()
 	// own stronger restriction, and the existing airborne duration is never reset here.
 	WallRunReattachTime = GetWorld()->GetTimeSeconds();
 	DebugWallRun(TEXT("wall jump: native falling; same surface locked"));
+	if (AFPPlayerCharacter* Player = Cast<AFPPlayerCharacter>(CharacterOwner))
+	{
+		Player->NotifyWallJumpCamera(Normal);
+	}
 	return true;
 }
 

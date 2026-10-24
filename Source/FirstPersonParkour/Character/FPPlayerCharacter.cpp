@@ -47,6 +47,80 @@ void AFPPlayerCharacter::BeginPlay()
 	StandingCapsuleHalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
 }
 
+void AFPPlayerCharacter::FCameraFeedbackPulse::Sample(double Now, FVector& Offset, float& FOV) const
+{
+	Offset = FVector::ZeroVector;
+	FOV = 0.0f;
+	if (StartTime < 0.0 || Now < StartTime || Now >= StartTime + Duration)
+	{
+		return;
+	}
+	const float Age = static_cast<float>((Now - StartTime) / Duration);
+	const auto SmoothStep = [](float T) { return T * T * (3.0f - 2.0f * T); };
+	// Sixteen percent attack, then a longer recovery; zero slope at both ends
+	// and at the peak. No oscillation, random shake or additive pulse stacking.
+	constexpr float AttackFraction = 0.16f;
+	const float Pulse = Age < AttackFraction ? SmoothStep(Age / AttackFraction)
+		: 1.0f - SmoothStep((Age - AttackFraction) / (1.0f - AttackFraction));
+	const float Carry = (1.0f - SmoothStep(Age)) * (1.0f - Pulse);
+	// The nonnegative weights sum to at most one, bounding even rapid chaining.
+	Offset = StartOffset * Carry + PeakOffset * Pulse;
+	FOV = StartFOV * Carry + PeakFOV * Pulse;
+}
+
+void AFPPlayerCharacter::FCameraFeedbackPulse::Trigger(double Now, const FVector& Offset, float FOV, float RecoveryDuration)
+{
+	// Retain the currently rendered contribution so re-triggering cannot snap it.
+	FVector CurrentOffset;
+	float CurrentFOV;
+	Sample(Now, CurrentOffset, CurrentFOV);
+	StartOffset = CurrentOffset;
+	StartFOV = CurrentFOV;
+	PeakOffset = Offset;
+	PeakFOV = FOV;
+	StartTime = Now;
+	Duration = RecoveryDuration;
+}
+
+void AFPPlayerCharacter::NotifyWallJumpCamera(const FVector& JumpedWallNormal)
+{
+	bWallJumpLandingPending = true;
+	if (!bEnableWallJumpCameraEffects || JumpedWallNormal.ContainsNaN())
+	{
+		return;
+	}
+	const FVector AwayFromWall = JumpedWallNormal.GetSafeNormal2D();
+	if (AwayFromWall.IsNearlyZero())
+	{
+		return;
+	}
+	WallJumpCameraPulse.Trigger(GetWorld()->GetTimeSeconds(),
+		AwayFromWall * FMath::Clamp(WallJumpCameraImpulseIntensity, 0.0f, 3.0f),
+		FMath::Clamp(WallJumpCameraFOVPulse, 0.0f, 5.0f),
+		FMath::Clamp(WallJumpCameraRecoveryDuration, 0.15f, 1.0f));
+}
+
+void AFPPlayerCharacter::Landed(const FHitResult& Hit)
+{
+	// Landed is called before native falling velocity is converted to ground motion.
+	// Sample it here; feedback never writes to gameplay velocity or transforms.
+	if (bWallJumpLandingPending && bEnableWallJumpCameraEffects && bEnableWallJumpLandingFeedback)
+	{
+		const float ImpactSpeed = FMath::Max(0.0f, -FVector::DotProduct(GetVelocity(), Hit.ImpactNormal));
+		const float MinSpeed = FMath::Max(0.0f, WallJumpLandingMinSpeed);
+		const float FullSpeed = FMath::Max(MinSpeed + 1.0f, WallJumpLandingFullEffectSpeed);
+		const float Strength = FMath::Clamp((ImpactSpeed - MinSpeed) / (FullSpeed - MinSpeed), 0.0f, 1.0f);
+		if (Strength > 0.0f)
+		{
+			WallJumpLandingPulse.Trigger(GetWorld()->GetTimeSeconds(),
+				-FVector::UpVector * FMath::Clamp(WallJumpLandingIntensity, 0.0f, 2.0f) * Strength,
+				0.0f, FMath::Clamp(WallJumpLandingRecoveryDuration, 0.1f, 0.6f));
+		}
+	}
+	bWallJumpLandingPending = false;
+	Super::Landed(Hit);
+}
+
 void AFPPlayerCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 {
 	// Resolve the eye after movement, when the view is requested. Collision only
@@ -120,7 +194,16 @@ void AFPPlayerCharacter::ApplyWallRunCameraEffects(float DeltaTime, FMinimalView
 	const float ContactMotion = FMath::Sin(WallRunCameraMotionPhase)
 		* FMath::Clamp(WallRunCameraMotionAmplitude, 0.0f, 0.5f) * WallRunCameraMotionWeight;
 	const float EntryDip = EntryPulse * FMath::Clamp(WallRunCameraEntryImpulse, 0.0f, 2.0f);
-	const FVector VisualOffset = SmoothedWallRunOffset + FVector::UpVector * (ContactMotion - EntryDip);
+	FVector JumpOffset;
+	FVector LandingOffset;
+	float JumpFOV;
+	float LandingFOV;
+	const double Now = GetWorld()->GetTimeSeconds();
+	WallJumpCameraPulse.Sample(Now, JumpOffset, JumpFOV);
+	WallJumpLandingPulse.Sample(Now, LandingOffset, LandingFOV);
+	// Share the existing camera collision solution with all cosmetic displacement.
+	const FVector VisualOffset = SmoothedWallRunOffset + FVector::UpVector * (ContactMotion - EntryDip)
+		+ JumpOffset + LandingOffset;
 
 	// Preserve the existing slide-camera solution. Sweep the additional visual
 	// displacement from that safe eye, constraining it immediately at obstructions.
@@ -153,8 +236,8 @@ void AFPPlayerCharacter::ApplyWallRunCameraEffects(float DeltaTime, FMinimalView
 	// Super::CalcCamera supplies a fresh base view each call. Apply offsets only
 	// to that view, never to control rotation, component rotation or stored FOV.
 	OutResult.Rotation.Roll = FRotator::NormalizeAxis(OutResult.Rotation.Roll + SmoothedWallRunRoll);
-	OutResult.FOV = FMath::Clamp(OutResult.FOV + SmoothedWallRunFOV, 5.0f, 170.0f);
-	OutResult.FirstPersonFOV = FMath::Clamp(OutResult.FirstPersonFOV + SmoothedWallRunFOV, 5.0f, 170.0f);
+	OutResult.FOV = FMath::Clamp(OutResult.FOV + SmoothedWallRunFOV + JumpFOV, 5.0f, 170.0f);
+	OutResult.FirstPersonFOV = FMath::Clamp(OutResult.FirstPersonFOV + SmoothedWallRunFOV + JumpFOV, 5.0f, 170.0f);
 }
 
 void AFPPlayerCharacter::RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation)
@@ -166,6 +249,9 @@ void AFPPlayerCharacter::RestoreCameraAfterCapsuleResize(const FVector& Previous
 
 void AFPPlayerCharacter::NotifyControllerChanged()
 {
+	WallJumpCameraPulse = FCameraFeedbackPulse();
+	WallJumpLandingPulse = FCameraFeedbackPulse();
+	bWallJumpLandingPending = false;
 	// Possession changes must not leave sprint latched on the previous pawn.
 	StopSprint();
 	ParkourMovementComponent->StopSlide();
