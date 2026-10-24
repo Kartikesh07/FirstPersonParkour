@@ -101,9 +101,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "1"))
 	float WallRunGravityScale = 0.3f;
 
-	/** One wall run per airborne period; only landing restores eligibility. */
+	/** Cumulative wall-running time per airborne period; only landing restores the budget. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.01", Units = "s"))
 	float WallRunMaxDuration = 1.5f;
+
+	/** Brief probe misses don't immediately detach at seams or changes in wall height. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "0.25", Units = "s"))
+	float WallRunContactGraceTime = 0.1f;
+
+	/** Prevent immediate falling/custom-mode loops without consuming an unused airborne budget. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0.01", Units = "s"))
+	float WallRunReattachCooldown = 0.2f;
 
 	/** Maximum absolute surface-normal Z; rejects floors, ceilings and steeply inclined walls. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Wall Run", meta = (ClampMin = "0", ClampMax = "0.3"))
@@ -141,6 +149,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
 	bool bShowMovementDebug = false;
 
+	/** Draw wall probes/normals and report throttled rejection, entry and detachment diagnostics. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
+	bool bShowWallRunDebug = false;
+
 protected:
 	virtual void UpdateCharacterStateBeforeMovement(float DeltaSeconds) override;
 	virtual void UpdateCharacterStateAfterMovement(float DeltaSeconds) override;
@@ -152,14 +164,20 @@ protected:
 private:
 	static constexpr uint8 WallRunMode = 1;
 	bool IsSuitableWall(const FHitResult& Hit) const;
+	const TCHAR* GetWallRejectionReason(const FHitResult& Hit) const;
 	bool TraceWall(const FVector& Direction, FHitResult& Hit) const;
+	bool IsWallRunDebugEnabled() const;
+	void DebugWallRun(const TCHAR* Message);
 	bool TryStartWallRun();
 	void PhysWallRun(float DeltaTime, int32 Iterations);
-	void EndWallRun(float RemainingTime, int32 Iterations);
+	void EndWallRun(float RemainingTime, int32 Iterations, const TCHAR* Reason);
 	FVector WallRunNormal = FVector::ZeroVector;
 	FVector WallRunDirection = FVector::ZeroVector;
 	float WallRunElapsed = 0.0f;
-	bool bWallRunUsed = false;
+	float WallRunContactLostTime = 0.0f;
+	double WallRunReattachTime = 0.0;
+	double NextWallRunDebugTime = 0.0;
+	FString LastWallRunDebugMessage;
 
 	bool bSprintRequested = false;
 	bool bSlideRequested = false;

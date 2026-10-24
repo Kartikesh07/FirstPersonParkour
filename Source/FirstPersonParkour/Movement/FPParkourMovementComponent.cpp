@@ -4,6 +4,7 @@
 #include "Character/FPPlayerCharacter.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
@@ -11,6 +12,11 @@
 
 static TAutoConsoleVariable<int32> CVarParkourMovementDebug(
 	TEXT("parkour.DebugMovement"), 0, TEXT("Display local player movement: 0 = off, 1 = on."));
+
+static TAutoConsoleVariable<int32> CVarParkourWallRunDebug(
+	TEXT("parkour.DebugWallRun"), 0, TEXT("Wall probes, rejection and detach diagnostics: 0 = off, 1 = on."));
+
+DEFINE_LOG_CATEGORY_STATIC(LogParkourWallRun, Log, All);
 
 UFPParkourMovementComponent::UFPParkourMovementComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -209,13 +215,16 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 	const bool bWasWallRunning = PreviousMovementMode == MOVE_Custom && PreviousCustomMode == WallRunMode;
 	if (IsWallRunning())
 	{
-		bWallRunUsed = true;
-		WallRunElapsed = 0.0f;
+		WallRunContactLostTime = 0.0f;
+	}
+	if (bWasWallRunning && !IsWallRunning())
+	{
+		WallRunReattachTime = GetWorld()->GetTimeSeconds() + FMath::Max(0.01f, WallRunReattachCooldown);
 	}
 	if (IsMovingOnGround())
 	{
-		bWallRunUsed = false;
 		WallRunElapsed = 0.0f;
+		WallRunReattachTime = 0.0;
 	}
 	if (IsFalling() && PreviousMovementMode != MOVE_Falling)
 	{
@@ -263,12 +272,59 @@ void UFPParkourMovementComponent::PhysCustom(float deltaTime, int32 Iterations)
 
 bool UFPParkourMovementComponent::IsSuitableWall(const FHitResult& Hit) const
 {
+	return GetWallRejectionReason(Hit) == nullptr;
+}
+
+const TCHAR* UFPParkourMovementComponent::GetWallRejectionReason(const FHitResult& Hit) const
+{
 	const UPrimitiveComponent* Surface = Hit.GetComponent();
-	return Hit.IsValidBlockingHit() && Surface && !IsWalkable(Hit)
-		&& FMath::Abs(Hit.ImpactNormal.Z) <= FMath::Clamp(WallRunMaxNormalZ, 0.0f, 0.3f)
-		// Moving/physics surfaces require base-relative movement, which this mode doesn't implement.
-		&& Surface->GetMobility() != EComponentMobility::Movable && !Surface->IsSimulatingPhysics()
-		&& !Cast<APawn>(Hit.GetActor());
+	if (!Hit.IsValidBlockingHit() || !Surface)
+	{
+		return Hit.bStartPenetrating ? TEXT("probe starts penetrating") : TEXT("no blocking wall");
+	}
+	if (IsWalkable(Hit) || FMath::Abs(Hit.ImpactNormal.Z) > FMath::Clamp(WallRunMaxNormalZ, 0.0f, 0.3f))
+	{
+		return TEXT("floor/ceiling/unsuitable wall angle");
+	}
+	// Mobility describes whether a component CAN move, not whether it IS moving.
+	// Ordinary stationary BlockAllDynamic test meshes must remain eligible.
+	if (Surface->IsSimulatingPhysics() || Cast<APawn>(Hit.GetActor()))
+	{
+		return TEXT("physics body or pawn");
+	}
+	if (!Surface->GetComponentVelocity().IsNearlyZero(1.0f))
+	{
+		return TEXT("moving surface requires base-relative physics");
+	}
+	return nullptr;
+}
+
+bool UFPParkourMovementComponent::IsWallRunDebugEnabled() const
+{
+	return bShowWallRunDebug || CVarParkourWallRunDebug.GetValueOnGameThread() != 0;
+}
+
+void UFPParkourMovementComponent::DebugWallRun(const TCHAR* Message)
+{
+	if (!IsWallRunDebugEnabled())
+	{
+		return;
+	}
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (LastWallRunDebugMessage == Message && Now < NextWallRunDebugTime)
+	{
+		return;
+	}
+	LastWallRunDebugMessage = Message;
+	NextWallRunDebugTime = Now + 0.5;
+	const FString Status = FString::Printf(TEXT("WallRun: %s | Mode %d/%d | XY %.0f/%.0f Z %.0f | budget %.2f/%.2f"),
+		Message, static_cast<int32>(MovementMode), CustomMovementMode, Velocity.Size2D(), WallRunMinSpeed,
+		Velocity.Z, WallRunElapsed, WallRunMaxDuration);
+	UE_LOG(LogParkourWallRun, Log, TEXT("%s: %s"), *GetNameSafe(CharacterOwner), *Status);
+	if (GEngine && CharacterOwner && CharacterOwner->IsLocallyControlled())
+	{
+		GEngine->AddOnScreenDebugMessage((1ull << 32) | GetUniqueID(), 0.6f, FColor::Cyan, Status);
+	}
 }
 
 bool UFPParkourMovementComponent::TraceWall(const FVector& Direction, FHitResult& Hit) const
@@ -276,33 +332,99 @@ bool UFPParkourMovementComponent::TraceWall(const FVector& Direction, FHitResult
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(WallRun), false, CharacterOwner);
 	FCollisionResponseParams Response;
 	InitCollisionParams(Params, Response);
-	const FVector Start = UpdatedComponent->GetComponentLocation();
+	const FVector Center = UpdatedComponent->GetComponentLocation();
+	const UCapsuleComponent* Capsule = CharacterOwner->GetCapsuleComponent();
 	const float Reach = CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius()
 		+ FMath::Max(0.0f, WallDetectionDistance);
-	return GetWorld()->LineTraceSingleByChannel(Hit, Start, Start + Direction * Reach,
-		UpdatedComponent->GetCollisionObjectType(), Params, Response) && IsSuitableWall(Hit);
+	// Both probes stay within the capsule's cylindrical section. The lower probe
+	// keeps a jump alongside a wall detectable when its top passes below capsule center.
+	const float LowerOffset = FMath::Min(Capsule->GetScaledCapsuleHalfHeight() * 0.5f,
+		FMath::Max(0.0f, Capsule->GetScaledCapsuleHalfHeight() - Capsule->GetScaledCapsuleRadius()));
+	const bool bDebug = IsWallRunDebugEnabled();
+	for (const float Offset : { 0.0f, LowerOffset })
+	{
+		const FVector Start = Center - FVector::UpVector * Offset;
+		const FVector End = Start + Direction * Reach;
+		FHitResult ProbeHit;
+		GetWorld()->LineTraceSingleByChannel(ProbeHit, Start, End,
+			UpdatedComponent->GetCollisionObjectType(), Params, Response);
+		const TCHAR* Rejection = GetWallRejectionReason(ProbeHit);
+		if (bDebug)
+		{
+			const FColor Color = !Rejection ? FColor::Green : ProbeHit.bBlockingHit ? FColor::Yellow : FColor::Red;
+			DrawDebugLine(GetWorld(), Start, End, Color, false, 0.05f, 0, 1.0f);
+			if (ProbeHit.bBlockingHit)
+			{
+				DrawDebugPoint(GetWorld(), ProbeHit.ImpactPoint, 6.0f, Color, false, 0.05f);
+				DrawDebugLine(GetWorld(), ProbeHit.ImpactPoint, ProbeHit.ImpactPoint + ProbeHit.ImpactNormal * 25.0f,
+					FColor::Cyan, false, 0.05f);
+				DrawDebugString(GetWorld(), ProbeHit.ImpactPoint, FString::Printf(TEXT("%s: %s (channel %d, normal Z %.2f)"),
+					*GetNameSafe(ProbeHit.GetComponent()), Rejection ? Rejection : TEXT("eligible"),
+					static_cast<int32>(UpdatedComponent->GetCollisionObjectType()), ProbeHit.ImpactNormal.Z),
+					nullptr, Color, 0.05f);
+			}
+		}
+		if (!Rejection)
+		{
+			Hit = ProbeHit;
+			return true;
+		}
+		// Retain a rejected blocking hit so callers can diagnose invalid surfaces.
+		if (!Hit.bBlockingHit || ProbeHit.bBlockingHit)
+		{
+			Hit = ProbeHit;
+		}
+	}
+	return false;
 }
 
 bool UFPParkourMovementComponent::TryStartWallRun()
 {
-	if (!HasValidData() || !IsFalling() || bWallRunUsed || IsCrouching() || bWantsToCrouch
-		|| !CharacterOwner->Controller || HasAnimRootMotion() || CurrentRootMotion.HasOverrideVelocity()
-		|| Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed)
-		|| Velocity.Z < -FMath::Max(0.0f, WallRunMaxEntryFallSpeed))
+	if (!HasValidData() || !IsFalling())
 	{
 		return false;
+	}
+	const auto Reject = [this](const TCHAR* Reason)
+	{
+		DebugWallRun(Reason);
+		return false;
+	};
+	if (WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration) - MIN_TICK_TIME)
+	{
+		return Reject(TEXT("reject: airborne time budget exhausted; land to reset"));
+	}
+	if (GetWorld()->GetTimeSeconds() < WallRunReattachTime)
+	{
+		return Reject(TEXT("reject: reattachment cooldown"));
+	}
+	if (IsCrouching() || bWantsToCrouch || !CharacterOwner->Controller)
+	{
+		return Reject(TEXT("reject: crouched or no controller"));
+	}
+	if (HasAnimRootMotion() || CurrentRootMotion.HasOverrideVelocity())
+	{
+		return Reject(TEXT("reject: root motion owns velocity"));
+	}
+	if (Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed))
+	{
+		return Reject(TEXT("reject: below minimum horizontal speed"));
+	}
+	if (Velocity.Z < -FMath::Max(0.0f, WallRunMaxEntryFallSpeed))
+	{
+		return Reject(TEXT("reject: descending too fast"));
 	}
 
 	const FVector Travel = Velocity.GetSafeNormal2D();
 	// Enter while traveling forward, rather than when backing or strafing into a wall.
 	if (FVector::DotProduct(Travel, CharacterOwner->GetActorForwardVector()) <= 0.25f)
 	{
-		return false;
+		return Reject(TEXT("reject: not traveling forward"));
 	}
 	// Left/right are relative to travel, so looking around never breaks an active run.
 	const FVector Right = FVector::CrossProduct(FVector::UpVector, Travel);
 	FHitResult BestHit;
 	float BestDistance = UE_BIG_NUMBER;
+	const TCHAR* Rejection = TEXT("reject: no blocking side wall within reach");
 	for (const float Side : { -1.0f, 1.0f })
 	{
 		FHitResult Hit;
@@ -315,16 +437,25 @@ bool UFPParkourMovementComponent::TryStartWallRun()
 				BestHit = Hit;
 				BestDistance = Hit.Distance;
 			}
+			else
+			{
+				Rejection = TEXT("reject: travel/wall alignment below minimum");
+			}
+		}
+		else if (Hit.bBlockingHit)
+		{
+			Rejection = GetWallRejectionReason(Hit);
 		}
 	}
 	if (!BestHit.IsValidBlockingHit())
 	{
-		return false;
+		return Reject(Rejection);
 	}
 	WallRunNormal = BestHit.ImpactNormal.GetSafeNormal2D();
 	WallRunDirection = Travel;
 	// No velocity boost, vertical reset or position snap on entry.
 	SetMovementMode(MOVE_Custom, WallRunMode);
+	DebugWallRun(IsWallRunning() ? TEXT("entered custom wall-run mode") : TEXT("reject: movement mode transition failed"));
 	return IsWallRunning();
 }
 
@@ -338,8 +469,9 @@ void UFPParkourMovementComponent::PhysFalling(float deltaTime, int32 Iterations)
 	Super::PhysFalling(deltaTime, Iterations);
 }
 
-void UFPParkourMovementComponent::EndWallRun(float RemainingTime, int32 Iterations)
+void UFPParkourMovementComponent::EndWallRun(float RemainingTime, int32 Iterations, const TCHAR* Reason)
 {
+	DebugWallRun(Reason);
 	// Preserve velocity and let native falling consume any unused simulation time.
 	SetMovementMode(MOVE_Falling);
 	StartNewPhysics(RemainingTime, Iterations);
@@ -359,22 +491,60 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		const float DurationLeft = FMath::Max(0.01f, WallRunMaxDuration) - WallRunElapsed;
 		const float CornerCos = FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(WallRunMaxCornerAngle, 0.0f, 60.0f)));
 		const FVector Input = Acceleration / FMath::Max(1.0f, GetMaxAcceleration());
-		if (DurationLeft < MIN_TICK_TIME || !CharacterOwner->Controller || IsCrouching() || bWantsToCrouch
-			|| HasAnimRootMotion() || CurrentRootMotion.HasOverrideVelocity()
-			|| Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed)
-			|| FVector::DotProduct(Input, WallRunNormal) > FMath::Clamp(WallRunDetachInputThreshold, 0.1f, 1.0f)
-			|| !TraceWall(-WallRunNormal, WallHit)
-			|| FVector::DotProduct(WallHit.ImpactNormal.GetSafeNormal2D(), WallRunNormal) < CornerCos)
+		const TCHAR* DetachReason = nullptr;
+		if (DurationLeft < MIN_TICK_TIME)
 		{
-			EndWallRun(RemainingTime, Iterations);
+			DetachReason = TEXT("detach: airborne time budget exhausted");
+		}
+		else if (!CharacterOwner->Controller || IsCrouching() || bWantsToCrouch)
+		{
+			DetachReason = TEXT("detach: crouched or no controller");
+		}
+		else if (HasAnimRootMotion() || CurrentRootMotion.HasOverrideVelocity())
+		{
+			DetachReason = TEXT("detach: root motion owns velocity");
+		}
+		else if (Velocity.Size2D() < FMath::Max(1.0f, WallRunMinSpeed))
+		{
+			DetachReason = TEXT("detach: below minimum horizontal speed");
+		}
+		else if (FVector::DotProduct(Input, WallRunNormal) > FMath::Clamp(WallRunDetachInputThreshold, 0.1f, 1.0f))
+		{
+			DetachReason = TEXT("detach: outward movement input");
+		}
+		if (DetachReason)
+		{
+			EndWallRun(RemainingTime, Iterations, DetachReason);
 			return;
 		}
 
 		++Iterations;
 		const float TimeTick = FMath::Min(GetSimulationTimeStep(RemainingTime, Iterations), DurationLeft);
+		const bool bHasContact = TraceWall(-WallRunNormal, WallHit);
+		if (bHasContact)
+		{
+			WallRunContactLostTime = 0.0f;
+			if (FVector::DotProduct(WallHit.ImpactNormal.GetSafeNormal2D(), WallRunNormal) < CornerCos)
+			{
+				EndWallRun(RemainingTime, Iterations, TEXT("detach: wall corner too sharp"));
+				return;
+			}
+			WallRunNormal = WallHit.ImpactNormal.GetSafeNormal2D();
+			DebugWallRun(TEXT("active: valid wall contact"));
+		}
+		else
+		{
+			WallRunContactLostTime += TimeTick;
+			if (WallHit.bBlockingHit || WallRunContactLostTime > FMath::Clamp(WallRunContactGraceTime, 0.0f, 0.25f))
+			{
+				EndWallRun(RemainingTime, Iterations, WallHit.bBlockingHit
+					? GetWallRejectionReason(WallHit) : TEXT("detach: wall contact lost beyond grace time"));
+				return;
+			}
+			DebugWallRun(TEXT("contact grace: briefly following last valid wall normal"));
+		}
 		RemainingTime -= TimeTick;
 		WallRunElapsed += TimeTick;
-		WallRunNormal = WallHit.ImpactNormal.GetSafeNormal2D();
 		FVector Tangent = FVector::CrossProduct(FVector::UpVector, WallRunNormal);
 		if (FVector::DotProduct(Tangent, WallRunDirection) < 0.0f)
 		{
@@ -392,7 +562,8 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 		Velocity = NewFallVelocity(Velocity, FVector(0.0f, 0.0f, GetGravityZ()) * FMath::Clamp(WallRunGravityScale, 0.0f, 1.0f), TimeTick);
 
 		// Close the gap gradually using the same swept capsule movement as travel.
-		const float Gap = FMath::Max(0.0f, WallHit.Distance - CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius() - 2.0f);
+		const float Gap = bHasContact
+			? FMath::Max(0.0f, WallHit.Distance - CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius() - 2.0f) : 0.0f;
 		const FVector Attraction = -WallRunNormal * FMath::Min(Gap, FMath::Max(0.0f, WallRunAttractionSpeed) * TimeTick);
 		const FVector Delta = (OldVelocity + Velocity) * (0.5f * TimeTick) + Attraction;
 		FHitResult Hit;
@@ -405,6 +576,11 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 			}
 			return;
 		}
+		if (Hit.bStartPenetrating)
+		{
+			EndWallRun(RemainingTime, Iterations, TEXT("detach: unresolved capsule penetration"));
+			return;
+		}
 
 		if (Hit.IsValidBlockingHit())
 		{
@@ -414,6 +590,7 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 			{
 				if (Velocity.Z <= 0.0f && IsValidLandingSpot(UpdatedComponent->GetComponentLocation(), Hit))
 				{
+					DebugWallRun(TEXT("detach: landed on walkable floor"));
 					SetMovementMode(MOVE_Falling);
 					ProcessLanded(Hit, RemainingTime + UnusedTime, Iterations);
 					return;
@@ -434,7 +611,8 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 				}
 				if (!IsSuitableWall(Hit) || FVector::DotProduct(Hit.ImpactNormal.GetSafeNormal2D(), WallRunNormal) < CornerCos)
 				{
-					EndWallRun(RemainingTime + UnusedTime, Iterations);
+					EndWallRun(RemainingTime + UnusedTime, Iterations,
+						IsSuitableWall(Hit) ? TEXT("detach: blocking corner too sharp") : GetWallRejectionReason(Hit));
 					return;
 				}
 				if (Impact == 1 || UnusedTime < MIN_TICK_TIME)
@@ -448,6 +626,11 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 					return;
 				}
 				UnusedTime *= 1.0f - Hit.Time;
+				if (Hit.bStartPenetrating)
+				{
+					EndWallRun(RemainingTime, Iterations, TEXT("detach: unresolved slide penetration"));
+					return;
+				}
 				if (!Hit.IsValidBlockingHit())
 				{
 					break;
@@ -457,6 +640,6 @@ void UFPParkourMovementComponent::PhysWallRun(float DeltaTime, int32 Iterations)
 	}
 	if (IsWallRunning() && WallRunElapsed >= FMath::Max(0.01f, WallRunMaxDuration))
 	{
-		EndWallRun(RemainingTime, Iterations);
+		EndWallRun(RemainingTime, Iterations, TEXT("detach: airborne time budget exhausted"));
 	}
 }
