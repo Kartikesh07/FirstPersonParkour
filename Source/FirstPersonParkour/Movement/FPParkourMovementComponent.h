@@ -20,6 +20,9 @@ public:
 	UFPParkourMovementComponent(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	virtual float GetMaxSpeed() const override;
+	virtual void BeginPlay() override;
+	virtual void Crouch(bool bClientSimulation = false) override;
+	virtual void UnCrouch(bool bClientSimulation = false) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	void SetSprintRequested(bool bRequested) { bSprintRequested = bRequested; }
@@ -50,11 +53,19 @@ public:
 
 	/** Ground walking speed; acceleration and braking approach this cap using native physics. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement", meta = (ClampMin = "0", Units = "cm/s"))
-	float WalkSpeed = 600.0f;
+	float WalkSpeed = 420.0f;
 
 	/** Ground speed while holding sprint, never lower than WalkSpeed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement", meta = (ClampMin = "0", Units = "cm/s"))
-	float SprintSpeed = 1000.0f;
+	float SprintSpeed = 900.0f;
+
+	/** Time for the ground speed cap to rise from walk to sprint. Velocity uses native acceleration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement", meta = (ClampMin = "0.01", Units = "s"))
+	float SprintAccelerationTime = 0.55f;
+
+	/** Time for the ground speed cap to return from sprint to walk while moving. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Movement", meta = (ClampMin = "0.01", Units = "s"))
+	float SprintDecelerationTime = 0.4f;
 
 	/** Optional local display of horizontal speed, world velocity and movement state. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Parkour|Debug")
@@ -71,6 +82,7 @@ private:
 	bool bSprintRequested = false;
 	bool bSlideRequested = false;
 	bool bSliding = false;
+	float CurrentGroundSpeed = 420.0f;
 	/** Takeoff speed cap, retained until landing even if sprint is released midair. */
 	float FallingSpeedLimit = 0.0f;
 };

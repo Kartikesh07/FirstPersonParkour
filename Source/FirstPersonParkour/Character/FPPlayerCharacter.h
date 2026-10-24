@@ -25,12 +25,13 @@ class FIRSTPERSONPARKOUR_API AFPPlayerCharacter : public ACharacter
 
 public:
 	AFPPlayerCharacter(const FObjectInitializer& ObjectInitializer);
+	virtual void CalcCamera(float DeltaTime, struct FMinimalViewInfo& OutResult) override;
+
+	/** Called around native capsule resizing to compensate its actual displacement, including clearance adjustments. */
+	void RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation);
 
 protected:
 	virtual void BeginPlay() override;
-	virtual void Tick(float DeltaSeconds) override;
-	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
-	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 	virtual void NotifyControllerChanged() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -94,13 +95,22 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0", Units = "cm"))
 	float SlideCameraLowering = 72.0f;
 
-	/** Exponential transition rate per second. */
+	/** Exponential lowering rate per second; 10 reaches 95 percent of the drop in 0.3 seconds. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0.1"))
-	float SlideCameraTransitionSpeed = 12.0f;
+	float SlideCameraTransitionSpeed = 10.0f;
+
+	/** Exponential restoration rate per second. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0.1"))
+	float SlideCameraRestoreSpeed = 9.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Slide", meta = (ClampMin = "0.1", Units = "cm"))
+	float SlideCameraProbeRadius = 6.0f;
 
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> InputSubsystem;
 
 private:
-	float StandingCameraZ = 64.0f;
+	FVector StandingCameraLocation = FVector(0.0f, 0.0f, 64.0f);
+	float SmoothedCameraZ = 64.0f;
+	FVector CameraCollisionOffset = FVector::ZeroVector;
 	float StandingCapsuleHalfHeight = 96.0f;
 };

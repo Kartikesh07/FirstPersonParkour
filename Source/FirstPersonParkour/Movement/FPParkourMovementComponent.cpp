@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Movement/FPParkourMovementComponent.h"
+#include "Character/FPPlayerCharacter.h"
+#include "Camera/CameraComponent.h"
 #include "Engine/Engine.h"
 #include "GameFramework/Character.h"
 #include "HAL/IConsoleManager.h"
@@ -12,14 +14,14 @@ UFPParkourMovementComponent::UFPParkourMovementComponent(const FObjectInitialize
 	: Super(ObjectInitializer)
 {
 	MaxAcceleration = 4000.0f;
-	GroundFriction = 6.0f;
+	GroundFriction = 5.0f;
 	// Use the current physics mode's friction for braking: ground friction when
 	// walking, zero lateral friction in air. Separate braking friction also acts
 	// during falling and would bleed momentum whenever movement input is released.
 	bUseSeparateBrakingFriction = false;
 	BrakingFriction = 4.0f;
 	BrakingFrictionFactor = 1.0f;
-	BrakingDecelerationWalking = 2400.0f;
+	BrakingDecelerationWalking = 1800.0f;
 	AirControl = 0.25f;
 	AirControlBoostMultiplier = 1.0f;
 	FallingLateralFriction = 0.0f;
@@ -30,8 +32,41 @@ UFPParkourMovementComponent::UFPParkourMovementComponent(const FObjectInitialize
 	SetCrouchedHalfHeight(48.0f);
 }
 
+void UFPParkourMovementComponent::BeginPlay()
+{
+	Super::BeginPlay();
+	CurrentGroundSpeed = FMath::Max(0.0f, WalkSpeed);
+}
+
+void UFPParkourMovementComponent::Crouch(bool bClientSimulation)
+{
+	AFPPlayerCharacter* Player = Cast<AFPPlayerCharacter>(CharacterOwner);
+	const FVector EyeLocation = Player ? Player->GetFirstPersonCameraComponent()->GetComponentLocation() : FVector::ZeroVector;
+	Super::Crouch(bClientSimulation);
+	if (Player)
+	{
+		Player->RestoreCameraAfterCapsuleResize(EyeLocation);
+	}
+}
+
+void UFPParkourMovementComponent::UnCrouch(bool bClientSimulation)
+{
+	AFPPlayerCharacter* Player = Cast<AFPPlayerCharacter>(CharacterOwner);
+	const FVector EyeLocation = Player ? Player->GetFirstPersonCameraComponent()->GetComponentLocation() : FVector::ZeroVector;
+	Super::UnCrouch(bClientSimulation);
+	if (Player)
+	{
+		Player->RestoreCameraAfterCapsuleResize(EyeLocation);
+	}
+}
+
 void UFPParkourMovementComponent::StopSlide()
 {
+	if (bSliding)
+	{
+		// Resume the speed-cap transition from actual slide momentum, including downhill speed.
+		CurrentGroundSpeed = FMath::Max(WalkSpeed, Velocity.Size2D());
+	}
 	bSlideRequested = false;
 	bSliding = false;
 	// Native state updates retry uncrouching until the standing capsule fits.
@@ -91,6 +126,13 @@ void UFPParkourMovementComponent::CalcVelocity(float DeltaTime, float Friction, 
 {
 	if (!bSliding || !IsMovingOnGround())
 	{
+		if (IsMovingOnGround() && !IsCrouching())
+		{
+			const float TargetSpeed = bSprintRequested ? FMath::Max(WalkSpeed, SprintSpeed) : WalkSpeed;
+			const float Duration = TargetSpeed > CurrentGroundSpeed ? SprintAccelerationTime : SprintDecelerationTime;
+			const float Rate = FMath::Max(1.0f, SprintSpeed - WalkSpeed) / FMath::Max(0.01f, Duration);
+			CurrentGroundSpeed = FMath::FInterpConstantTo(CurrentGroundSpeed, FMath::Max(0.0f, TargetSpeed), DeltaTime, Rate);
+		}
 		Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
 		return;
 	}
@@ -127,7 +169,6 @@ void UFPParkourMovementComponent::CalcVelocity(float DeltaTime, float Friction, 
 
 float UFPParkourMovementComponent::GetMaxSpeed() const
 {
-	const float GroundSpeed = bSprintRequested ? FMath::Max(WalkSpeed, SprintSpeed) : WalkSpeed;
 	if (IsFalling())
 	{
 		// Keep a fixed takeoff cap, rather than continually raising it with steering velocity.
@@ -135,7 +176,7 @@ float UFPParkourMovementComponent::GetMaxSpeed() const
 	}
 	if (IsMovingOnGround() && !IsCrouching())
 	{
-		return GroundSpeed;
+		return CurrentGroundSpeed;
 	}
 	return Super::GetMaxSpeed();
 }
@@ -144,11 +185,16 @@ void UFPParkourMovementComponent::OnMovementModeChanged(EMovementMode PreviousMo
 {
 	if (IsFalling() && PreviousMovementMode != MOVE_Falling)
 	{
-		FallingSpeedLimit = FMath::Max(Velocity.Size2D(), bSprintRequested ? FMath::Max(WalkSpeed, SprintSpeed) : WalkSpeed);
+		FallingSpeedLimit = FMath::Max(Velocity.Size2D(), CurrentGroundSpeed);
 	}
 	else if (!IsFalling())
 	{
 		FallingSpeedLimit = 0.0f;
+	}
+	if (IsMovingOnGround() && PreviousMovementMode == MOVE_Falling)
+	{
+		// Ease down from landing momentum instead of immediately reinstating the walking cap.
+		CurrentGroundSpeed = FMath::Max(WalkSpeed, Velocity.Size2D());
 	}
 	if (!IsMovingOnGround())
 	{

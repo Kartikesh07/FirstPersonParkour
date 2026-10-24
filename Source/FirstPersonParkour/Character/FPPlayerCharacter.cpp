@@ -42,54 +42,51 @@ AFPPlayerCharacter::AFPPlayerCharacter(const FObjectInitializer& ObjectInitializ
 void AFPPlayerCharacter::BeginPlay()
 {
 	Super::BeginPlay();
-	StandingCameraZ = FirstPersonCameraComponent->GetRelativeLocation().Z;
+	StandingCameraLocation = FirstPersonCameraComponent->GetRelativeLocation();
+	SmoothedCameraZ = StandingCameraLocation.Z;
 	StandingCapsuleHalfHeight = GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
 }
 
-void AFPPlayerCharacter::Tick(float DeltaSeconds)
+void AFPPlayerCharacter::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 {
-	Super::Tick(DeltaSeconds);
-	FVector CameraLocation = FirstPersonCameraComponent->GetRelativeLocation();
+	// Resolve the eye after movement, when the view is requested. Collision only
+	// constrains this frame's rendered position; it must not reset the smoothing state.
+	FVector CameraLocation = StandingCameraLocation;
 	const float CapsuleReduction = StandingCapsuleHalfHeight - GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
-	const float TargetZ = StandingCameraZ + CapsuleReduction - (bIsCrouched ? SlideCameraLowering : 0.0f);
-	const float Alpha = 1.0f - FMath::Exp(-FMath::Max(0.1f, SlideCameraTransitionSpeed) * DeltaSeconds);
-	CameraLocation.Z = FMath::Lerp(CameraLocation.Z, TargetZ, Alpha);
+	const float TargetZ = StandingCameraLocation.Z + CapsuleReduction - (bIsCrouched ? SlideCameraLowering : 0.0f);
+	const float Rate = bIsCrouched ? SlideCameraTransitionSpeed : SlideCameraRestoreSpeed;
+	const float Alpha = 1.0f - FMath::Exp(-FMath::Max(0.1f, Rate) * FMath::Max(0.0f, DeltaTime));
+	SmoothedCameraZ = FMath::Lerp(SmoothedCameraZ, TargetZ, Alpha);
+	CameraLocation.Z = SmoothedCameraZ;
+	// New obstructions constrain the view immediately for safety. Once clear,
+	// release that correction smoothly rather than snapping back to the desired eye.
+	CameraCollisionOffset *= FMath::Exp(-FMath::Max(0.1f, SlideCameraRestoreSpeed) * FMath::Max(0.0f, DeltaTime));
+	CameraLocation += CameraCollisionOffset;
 
 	// The smoothed eye can briefly extend beyond the shortened capsule. Keep it
 	// outside overhead geometry while the collision capsule passes underneath.
 	const FTransform CapsuleTransform = GetCapsuleComponent()->GetComponentTransform();
 	FHitResult CameraHit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(SlideCamera), false, this);
-	if ((bIsCrouched || !FMath::IsNearlyEqual(CameraLocation.Z, StandingCameraZ, 0.01f))
+	if ((bIsCrouched || !CameraCollisionOffset.IsNearlyZero()
+		|| !FMath::IsNearlyEqual(CameraLocation.Z, StandingCameraLocation.Z, 0.01f))
 		&& GetWorld()->SweepSingleByChannel(CameraHit, CapsuleTransform.GetLocation(),
 		CapsuleTransform.TransformPosition(CameraLocation), FQuat::Identity, ECC_Camera,
-		FCollisionShape::MakeSphere(6.0f), Params))
+		FCollisionShape::MakeSphere(FMath::Max(0.1f, SlideCameraProbeRadius)), Params))
 	{
-		CameraLocation = CapsuleTransform.InverseTransformPosition(CameraHit.Location);
+		const FVector SafeLocation = CapsuleTransform.InverseTransformPosition(CameraHit.Location);
+		CameraCollisionOffset += SafeLocation - CameraLocation;
+		CameraLocation = SafeLocation;
 	}
 	FirstPersonCameraComponent->SetRelativeLocation(CameraLocation);
+	Super::CalcCamera(DeltaTime, OutResult);
 }
 
-void AFPPlayerCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+void AFPPlayerCharacter::RestoreCameraAfterCapsuleResize(const FVector& PreviousEyeLocation)
 {
-	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
-	// Offset the native capsule-center shift so camera smoothing starts at its
-	// previous world height; capsule collision still changes immediately.
-	if (ParkourMovementComponent->IsMovingOnGround())
-	{
-		FirstPersonCameraComponent->SetRelativeLocation(
-			FirstPersonCameraComponent->GetRelativeLocation() + FVector(0.0f, 0.0f, HalfHeightAdjust));
-	}
-}
-
-void AFPPlayerCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
-{
-	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
-	if (ParkourMovementComponent->IsMovingOnGround())
-	{
-		FirstPersonCameraComponent->SetRelativeLocation(
-			FirstPersonCameraComponent->GetRelativeLocation() - FVector(0.0f, 0.0f, HalfHeightAdjust));
-	}
+	const FVector RestoredLocation = GetCapsuleComponent()->GetComponentTransform().InverseTransformPosition(PreviousEyeLocation);
+	SmoothedCameraZ += RestoredLocation.Z - FirstPersonCameraComponent->GetRelativeLocation().Z;
+	FirstPersonCameraComponent->SetRelativeLocation(RestoredLocation);
 }
 
 void AFPPlayerCharacter::NotifyControllerChanged()
